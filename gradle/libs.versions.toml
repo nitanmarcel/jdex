@@ -1,0 +1,25 @@
+[versions]
+coroutines = "1.11.0"
+flatlaf = "3.7.1"
+junit-jupiter = "6.0.1"
+kotlin = "2.3.20"
+miglayout = "11.4.2"
+moderndocking = "1.4.9"
+rsyntaxtextarea = "3.6.3"
+shadow = "9.4.2"
+sqlite = "3.53.2.0"
+
+[libraries]
+flatlaf = { module = "com.formdev:flatlaf", version.ref = "flatlaf" }
+flatlaf-extras = { module = "com.formdev:flatlaf-extras", version.ref = "flatlaf" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit-jupiter" }
+kotlinx-coroutines-swing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "coroutines" }
+miglayout-swing = { module = "com.miglayout:miglayout-swing", version.ref = "miglayout" }
+moderndocking-single-app = { module = "io.github.andrewauclair:modern-docking-single-app", version.ref = "moderndocking" }
+moderndocking-ui = { module = "io.github.andrewauclair:modern-docking-ui", version.ref = "moderndocking" }
+rsyntaxtextarea = { module = "com.fifesoft:rsyntaxtextarea", version.ref = "rsyntaxtextarea" }
+sqlite-jdbc = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+shadow = { id = "com.gradleup.shadow", version.ref = "shadow" }
