@@ -1,5 +1,6 @@
 package io.github.nitanmarcel.jdex.ui
 
+import com.formdev.flatlaf.extras.components.FlatTriStateCheckBox
 import io.github.andrewauclair.moderndocking.DockingRegion
 import io.github.andrewauclair.moderndocking.app.AppState
 import io.github.andrewauclair.moderndocking.Dockable
@@ -55,7 +56,9 @@ class MainWindow : JFrame("jdex") {
     private var session: ApkSession? = null
     private val renames = Renames()
     private var javaTab: EditorTab? = null
+    private var javaView: JavaView? = null
     private var javaClass: String? = null
+    private var syncState = FlatTriStateCheckBox.State.UNSELECTED
     private var bytecodeTab: EditorTab? = null
     private var bytecodeView: VirtualCodeView? = null
 
@@ -241,11 +244,13 @@ class MainWindow : JFrame("jdex") {
                         onUsages = { symbol -> session?.usages(symbol) },
                         renames = renames,
                         onRenamed = { renamesChanged() },
+                        onCaret = { target -> javaView?.followTo(target) },
                     )
                     val tab = EditorTab(tabId, title, view, source)
                     openTabs[tabId] = tab
                     bytecodeTab = tab
                     bytecodeView = view
+                    view.syncApprox = syncState == FlatTriStateCheckBox.State.INDETERMINATE
                     Docking.dock(tab, "editors", DockingRegion.CENTER)
                     log.info("Opened bytecode (${source.lineCount} lines)")
                 } else {
@@ -271,6 +276,7 @@ class MainWindow : JFrame("jdex") {
             Docking.deregisterDockable(it)
         }
         javaTab = null
+        javaView = null
         javaClass = null
     }
 
@@ -312,8 +318,20 @@ class MainWindow : JFrame("jdex") {
                 if (Docking.isDocked(it)) Docking.undock(it)
                 Docking.deregisterDockable(it)
             }
-            val tab = EditorTab("decompiled", result.title, JavaView(result.code))
+            val view = JavaView(
+                result.code,
+                result.sync,
+                onCaret = { target -> bytecodeView?.followFromJava(target) },
+                syncInitial = syncState,
+                onSyncToggle = { state ->
+                    syncState = state
+                    bytecodeView?.syncApprox = state == FlatTriStateCheckBox.State.INDETERMINATE
+                    if (state == FlatTriStateCheckBox.State.UNSELECTED) bytecodeView?.clearSyncHighlight()
+                },
+            )
+            val tab = EditorTab("decompiled", result.title, view)
             javaTab = tab
+            javaView = view
             val target = bytecodeTab
             if (target != null && Docking.isDocked(target)) Docking.dock(tab, target, DockingRegion.EAST, 0.5)
             else Docking.dock(tab, this@MainWindow, DockingRegion.EAST, 0.5)

@@ -1,13 +1,19 @@
 package io.github.nitanmarcel.jdex.project
 
 import com.android.apksig.ApkVerifier
+import jadx.api.ICodeInfo
 import jadx.api.JadxArgs
 import jadx.api.JadxDecompiler
+import jadx.api.JavaClass
+import jadx.api.JavaField
+import jadx.api.JavaMethod
 import jadx.api.ResourceFile
 import jadx.api.ResourceType
+import jadx.api.metadata.annotations.NodeDeclareRef
 import java.io.File
 import java.security.MessageDigest
 import java.security.cert.X509Certificate
+import java.util.TreeMap
 import java.util.zip.ZipFile
 
 class ApkSession private constructor(
@@ -87,7 +93,7 @@ class ApkSession private constructor(
         else -> null
     }
 
-    class Decompiled(val title: String, val code: String)
+    class Decompiled(val title: String, val code: String, val sync: CodeSync)
 
     private val appliedRenames = HashMap<String, String>()
 
@@ -119,11 +125,62 @@ class ApkSession private constructor(
     fun decompile(name: String): Decompiled? {
         val cls = classesByRawName[name] ?: return null
         val top = cls.topParentClass
-        val code = runCatching {
-            if (appliedRenames.isNotEmpty()) top.reload()
-            top.code
-        }.getOrElse { "// failed to decompile $name: ${it.message}" }
-        return Decompiled(top.fullName.substringAfterLast('.'), code)
+        val title = top.fullName.substringAfterLast('.')
+        return runCatching {
+            val info = if (appliedRenames.isNotEmpty()) top.reload() else top.codeInfo
+            Decompiled(title, info.codeStr, buildSync(info))
+        }.getOrElse { Decompiled(title, "// failed to decompile $name: ${it.message}", CodeSync.EMPTY) }
+    }
+
+    private fun buildSync(info: ICodeInfo): CodeSync {
+        if (!info.hasMetadata()) return CodeSync.EMPTY
+        val md = info.codeMetadata
+        val lineStarts = lineStarts(info.codeStr)
+        fun lineOf(pos: Int): Int {
+            var lo = 0; var hi = lineStarts.size - 1; var ans = 0
+            while (lo <= hi) { val m = (lo + hi) ushr 1; if (lineStarts[m] <= pos) { ans = m; lo = m + 1 } else hi = m - 1 }
+            return ans + 1
+        }
+        val targets = TreeMap<Int, SyncTarget>()
+        val srcToJava = HashMap<String, TreeMap<Int, Int>>()
+        for ((javaLine, sourceLine) in md.lineMapping) {
+            val pos = lineStarts.getOrNull(javaLine - 1) ?: continue
+            val method = jadx.getJavaNodeByRef(md.getNodeAt(pos) ?: continue) as? JavaMethod ?: continue
+            val methodId = methodId(method) ?: continue
+            targets[javaLine] = SyncTarget.Line(methodId, sourceLine)
+            srcToJava.getOrPut(methodId) { TreeMap() }.putIfAbsent(sourceLine, javaLine)
+        }
+        val classDecl = HashMap<String, Int>()
+        val methodDecl = HashMap<String, Int>()
+        val fieldDecl = HashMap<String, Int>()
+        for ((pos, annotation) in md.asMap) {
+            if (annotation !is NodeDeclareRef) continue
+            val line = lineOf(pos)
+            when (val node = jadx.getJavaNodeByRef(annotation.node)) {
+                is JavaMethod -> methodId(node)?.let { targets[line] = SyncTarget.MethodDecl(it); methodDecl[it] = line }
+                is JavaField -> {
+                    targets[line] = SyncTarget.FieldDecl(node.declaringClass.rawName, node.name)
+                    fieldDecl["${node.declaringClass.rawName}#${node.name}"] = line
+                }
+                is JavaClass -> {
+                    targets[line] = SyncTarget.ClassDecl(node.rawName)
+                    classDecl[node.rawName] = line
+                }
+                else -> {}
+            }
+        }
+        return CodeSync(targets, srcToJava, classDecl, methodDecl, fieldDecl)
+    }
+
+    private fun lineStarts(code: String): IntArray {
+        val starts = ArrayList<Int>().apply { add(0) }
+        for (i in code.indices) if (code[i] == '\n') starts.add(i + 1)
+        return starts.toIntArray()
+    }
+
+    private fun methodId(method: JavaMethod): String? {
+        val shortId = runCatching { method.methodNode.methodInfo.shortId }.getOrNull() ?: return null
+        return "${method.declaringClass.rawName}#$shortId"
     }
 
     fun topClasses(): List<HClass> =

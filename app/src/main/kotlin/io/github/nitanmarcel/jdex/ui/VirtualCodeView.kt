@@ -2,6 +2,7 @@ package io.github.nitanmarcel.jdex.ui
 
 import io.github.nitanmarcel.jdex.project.LineSource
 import io.github.nitanmarcel.jdex.project.Symbol
+import io.github.nitanmarcel.jdex.project.SyncTarget
 import io.github.nitanmarcel.jdex.project.SymbolKind
 import io.github.nitanmarcel.jdex.project.Syntax
 import org.fife.ui.rsyntaxtextarea.SyntaxScheme
@@ -62,6 +63,7 @@ class VirtualCodeView(
     private val onUsages: (Symbol) -> List<io.github.nitanmarcel.jdex.project.Usage>? = { null },
     private val renames: io.github.nitanmarcel.jdex.project.Renames = io.github.nitanmarcel.jdex.project.Renames(),
     private val onRenamed: () -> Unit = {},
+    private val onCaret: (target: SyncTarget) -> Unit = {},
 ) : JPanel(BorderLayout()) {
 
     private val commentCache = HashMap<String, String>()
@@ -86,6 +88,9 @@ class VirtualCodeView(
     private val commentColor: Color
     private val highlightColor: Color
     private val bookmarkColor: Color
+    private val syncColor = Color(0xFF, 0xD5, 0x4F, 60)
+    private var syncHighlightLine: Int? = null
+    var syncApprox = false
 
     private var topLine = 0
     private var xOffset = 0
@@ -191,6 +196,7 @@ class VirtualCodeView(
         ensureCaretVisible()
         surface.repaint()
         gutter.repaint()
+        reportCaret()
     }
 
     fun goToLine(line: Int, focusSurface: Boolean = true) {
@@ -211,6 +217,119 @@ class VirtualCodeView(
         surface.repaint()
         gutter.repaint()
         if (focusSurface) surface.requestFocusInWindow()
+        reportCaret()
+    }
+
+    private var lastSyncLine = -1
+
+    private fun reportCaret() {
+        if (caret.line == lastSyncLine) return
+        lastSyncLine = caret.line
+        targetAt(caret.line)?.let { onCaret(it) }
+    }
+
+    private fun targetAt(index: Int): SyncTarget? {
+        val t = rawLineText(index).trimStart()
+        val section = source.sectionAt(index) ?: return null
+        return when {
+            t.startsWith("Class:") -> SyncTarget.ClassDecl(section)
+            t.startsWith(".method") -> methodIdAt(index)?.let { SyncTarget.MethodDecl(it) }
+            t.startsWith(".field") -> SyncTarget.FieldDecl(section, fieldNameOf(t))
+            else -> methodIdAt(index)?.let { mid ->
+                sourceLineAt(index)?.let { SyncTarget.Line(mid, it) } ?: if (syncApprox) SyncTarget.MethodDecl(mid) else null
+            }
+        }
+    }
+
+    private fun fieldNameOf(trimmedLine: String): String =
+        trimmedLine.removePrefix(".field").substringBefore(" : ").trimEnd().substringAfterLast(' ')
+
+    private fun sourceLineAt(index: Int): Int? {
+        val start = source.sectionStart(source.sectionAt(index) ?: return null) ?: return null
+        val from = maxOf(start, index - 600)
+        var sourceLine: Int? = null
+        source.lines(from, index - from + 1).forEach {
+            val t = it.trimStart()
+            when {
+                t.startsWith(".method") -> sourceLine = null
+                t.startsWith(".line ") -> sourceLine = t.removePrefix(".line ").trim().toIntOrNull()
+            }
+        }
+        return sourceLine
+    }
+
+    private fun methodIdAt(index: Int): String? {
+        val section = source.sectionAt(index) ?: return null
+        val methodKey = methodKeyAt(index) ?: return null
+        return "$section#${methodKey.substringAfter("->")}"
+    }
+
+    fun followFromJava(target: SyncTarget) {
+        when (target) {
+            is SyncTarget.ClassDecl ->
+                source.sectionStart(target.rawName)?.let { showSyncHighlight(it) }
+            is SyncTarget.MethodDecl ->
+                findInMethod(target.methodId.substringBefore('#'), target.methodId.substringAfter('#'), header = true) { false }
+            is SyncTarget.FieldDecl ->
+                findInSection(target.rawName) { it.startsWith(".field") && fieldNameOf(it) == target.fieldName }
+            is SyncTarget.Line ->
+                findInMethod(target.methodId.substringBefore('#'), target.methodId.substringAfter('#'), header = false) {
+                    it == ".line ${target.sourceLine}"
+                }
+        }
+    }
+
+    private fun findInSection(rawName: String, match: (String) -> Boolean) {
+        val start = source.sectionStart(rawName) ?: return
+        background {
+            var line = start
+            var found: Int? = null
+            while (line < source.lineCount) {
+                val text = source.lines(line, 1).firstOrNull() ?: break
+                if (line > start && text.startsWith("Class:")) break
+                if (match(text.trimStart())) { found = line; break }
+                line++
+            }
+            SwingUtilities.invokeLater { showSyncHighlight(found ?: start) }
+        }
+    }
+
+    private fun findInMethod(rawName: String, shortId: String, header: Boolean, match: (String) -> Boolean) {
+        val start = source.sectionStart(rawName) ?: return
+        background {
+            var line = start
+            var inMethod = false
+            var methodLine: Int? = null
+            var found: Int? = null
+            while (line < source.lineCount) {
+                val text = source.lines(line, 1).firstOrNull() ?: break
+                val t = text.trimStart()
+                if (line > start && t.startsWith("Class:")) break
+                if (t.startsWith(".method")) {
+                    inMethod = t.substringAfterLast(' ') == shortId
+                    if (inMethod) { methodLine = line; if (header) { found = line; break } }
+                } else if (inMethod) {
+                    if (t == ".end method") break
+                    if (match(t)) { found = line; break }
+                }
+                line++
+            }
+            SwingUtilities.invokeLater { showSyncHighlight(found ?: methodLine ?: start) }
+        }
+    }
+
+    fun clearSyncHighlight() {
+        syncHighlightLine = null
+        surface.repaint()
+    }
+
+    private fun showSyncHighlight(line: Int) {
+        syncHighlightLine = line
+        val visible = visibleLines()
+        if (line < topLine || line >= topLine + visible) {
+            vBar.value = (line - visible / 3).coerceIn(0, (source.lineCount - visible).coerceAtLeast(0))
+        }
+        surface.repaint()
     }
 
     private fun back() {
@@ -257,6 +376,10 @@ class VirtualCodeView(
                 val line = (if (!renames.hasAny()) raw else renames.display(raw, { source.sectionAt(index) }, { curMethod })).replace("\t", "    ")
                 val y = k * lineHeight
 
+                if (index == syncHighlightLine) {
+                    g.color = syncColor
+                    g.fillRect(0, y, width, lineHeight)
+                }
                 if (index == caret.line) {
                     g.color = currentLineColor
                     g.fillRect(0, y, width, lineHeight)
@@ -544,8 +667,8 @@ class VirtualCodeView(
             trimmed.startsWith("Class:") -> Symbol(SymbolKind.TYPE, classDesc)
             trimmed.startsWith(".method") -> trimmed.substringAfterLast(' ').takeIf { '(' in it }?.let { Symbol(SymbolKind.METHOD, "$classDesc->$it") }
             trimmed.startsWith(".field") -> {
-                val parts = trimmed.removePrefix(".field").trim().split(" : ")
-                if (parts.size == 2) Symbol(SymbolKind.FIELD, "$classDesc->${parts[0].substringAfterLast(' ')}:${parts[1].trim()}") else null
+                val type = trimmed.substringAfter(" : ", "").trim()
+                if (type.isNotEmpty()) Symbol(SymbolKind.FIELD, "$classDesc->${fieldNameOf(trimmed)}:$type") else null
             }
             else -> null
         }
@@ -575,6 +698,7 @@ class VirtualCodeView(
                 anchor = caret
                 highlight = if (e.clickCount == 2) wordAt(lineText(caret.line), caret.col) else null
                 surface.repaint()
+                reportCaret()
             }
 
             override fun mouseReleased(e: MouseEvent) {

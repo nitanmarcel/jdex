@@ -154,14 +154,13 @@ class Renames(var store: RenameStore = NoRenames) {
             val newSig = name + sig.substring(sig.indexOf('('))
             return line.dropLast(sig.length) + newSig
         }
-        val parts = trimmed.removePrefix(".field").trim().split(" : ", limit = 2)
-        if (parts.size != 2) return line
-        val fieldName = parts[0].substringAfterLast(' ')
-        val name = displayNames["$secDesc->$fieldName"] ?: return line
-        val at = line.lastIndexOf(" : ")
+        val at = line.indexOf(" : ")
         if (at < 0) return line
         val head = line.substring(0, at)
-        return head.dropLast(fieldName.length) + name + line.substring(at)
+        val nameEnd = head.trimEnd().length
+        val fieldName = head.trimEnd().substringAfterLast(' ')
+        val name = displayNames["$secDesc->$fieldName"] ?: return line
+        return line.substring(0, nameEnd - fieldName.length) + name + line.substring(nameEnd)
     }
 
     fun toRaw(symbol: Symbol): Symbol = when (symbol.kind) {

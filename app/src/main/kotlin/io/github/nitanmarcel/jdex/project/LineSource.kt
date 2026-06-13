@@ -15,19 +15,14 @@ interface LineSource : AutoCloseable {
     val lineCount: Int
     fun lines(from: Int, count: Int): List<String>
 
-    /** Name of the section (class) that contains [line], or null. */
     fun sectionAt(line: Int): String?
 
-    /** First line of the named section, or null. */
     fun sectionStart(name: String): Int?
 
-    /** Last line of the section containing [line]. */
     fun sectionEnd(line: Int): Int
 
-    /** Next line at or after [from] (or before, if not [forward]) containing [query], or null. */
     fun search(query: String, from: Int, forward: Boolean, ignoreCase: Boolean): Int?
 
-    /** Up to [limit] lines at or after [fromLine] containing [query]. Resumable: pass last+1 to continue. */
     fun findFrom(query: String, fromLine: Int, limit: Int, ignoreCase: Boolean, transform: (Int, String) -> String = { _, t -> t }): List<Int>
 }
 
