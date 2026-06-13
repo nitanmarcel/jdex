@@ -3,11 +3,16 @@ package io.github.nitanmarcel.jdex.ui
 import io.github.andrewauclair.moderndocking.Dockable
 import io.github.andrewauclair.moderndocking.app.Docking
 import io.github.nitanmarcel.jdex.project.Content
+import io.github.nitanmarcel.jdex.project.MalformedDex
 import io.github.nitanmarcel.jdex.project.ProjectNode
 import java.awt.BorderLayout
+import java.awt.event.ActionEvent
+import java.awt.event.KeyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import javax.swing.AbstractAction
 import javax.swing.JMenuItem
+import javax.swing.KeyStroke
 import javax.swing.JPanel
 import javax.swing.JPopupMenu
 import javax.swing.JScrollPane
@@ -19,6 +24,7 @@ import javax.swing.tree.TreePath
 class FilesPanel(
     private val onOpen: (id: String, title: String, load: () -> Content) -> Unit,
     private val onFindUsages: (query: String) -> Unit = {},
+    private val onOpenDex: (MalformedDex) -> Unit = {},
 ) : JPanel(BorderLayout()), Dockable {
 
     private val root = DefaultMutableTreeNode()
@@ -39,6 +45,20 @@ class FilesPanel(
             override fun mousePressed(e: MouseEvent) = maybeMenu(e)
             override fun mouseReleased(e: MouseEvent) = maybeMenu(e)
         })
+
+        tree.inputMap.put(KeyStroke.getKeyStroke(KeyEvent.VK_ENTER, 0), "open")
+        tree.actionMap.put("open", object : AbstractAction() {
+            override fun actionPerformed(e: ActionEvent?) {
+                val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
+                val project = node.userObject as? ProjectNode
+                if (project?.dex != null || project?.open != null) {
+                    open(node)
+                } else {
+                    val path = TreePath(node.path)
+                    if (tree.isExpanded(path)) tree.collapsePath(path) else tree.expandPath(path)
+                }
+            }
+        })
     }
 
     private fun nodeAt(e: MouseEvent): DefaultMutableTreeNode? =
@@ -51,6 +71,7 @@ class FilesPanel(
         val node = path.lastPathComponent as DefaultMutableTreeNode
         val project = node.userObject as? ProjectNode ?: return
         val menu = JPopupMenu()
+        if (project.dex != null) menu.add(JMenuItem("Edit DEX…").apply { addActionListener { onOpenDex(project.dex!!) } })
         if (project.open != null) menu.add(JMenuItem("Open").apply { addActionListener { open(node) } })
         resourceRef(path)?.let { ref ->
             menu.add(JMenuItem("Find usages in Bytecode").apply { addActionListener { onFindUsages(ref) } })
@@ -69,6 +90,7 @@ class FilesPanel(
 
     private fun open(node: DefaultMutableTreeNode) {
         val project = node.userObject as? ProjectNode ?: return
+        project.dex?.let { onOpenDex(it); return }
         val load = project.open ?: return
         val id = TreePath(node.path).path.drop(1).joinToString("/") { it.toString() }
         onOpen(id, project.label, load)

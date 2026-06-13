@@ -22,6 +22,8 @@ class ApkSession private constructor(
     val appPackage: String?,
     val certificateCount: Int,
     private val manifestText: String,
+    val malformedDexes: List<MalformedDex>,
+    private val tempDexFiles: List<File>,
 ) : AutoCloseable {
 
     fun mainActivity(): String? = runCatching {
@@ -219,18 +221,27 @@ class ApkSession private constructor(
 
     private fun simpleName(type: String): String = type.substringAfterLast('.')
 
-    override fun close() = jadx.close()
+    override fun close() {
+        jadx.close()
+        tempDexFiles.forEach { runCatching { it.delete() } }
+    }
 
     companion object {
         private val PACKAGE = Regex("""package\s*=\s*"([^"]+)"""")
         private val DEX = Regex("""classes\d*\.dex""")
         private val MAX_BYTES = 1 shl 20
 
-        fun load(input: File, projectName: String): ApkSession {
-            val certificates = certificates(input)
+        fun load(input: File, projectName: String, dexStore: DexStore = NoDexStore): ApkSession {
+            val isApk = runCatching { ZipFile(input).use {} }.isSuccess
+            val certificates = if (isApk) certificates(input) else emptyList()
+
+            val extraDexFiles = mutableListOf<File>()
+            val malformed = mutableListOf<MalformedDex>()
+            gatherDexes(input, isApk, dexStore, extraDexFiles, malformed)
 
             val jadx = JadxDecompiler(JadxArgs().apply {
                 inputFiles.add(input)
+                extraDexFiles.forEach { inputFiles.add(it) }
                 setSkipResources(false)
                 setShowInconsistentCode(true)
                 renameFlags = emptySet()
@@ -274,9 +285,41 @@ class ApkSession private constructor(
 
             val container = appPackage?.let { ProjectNode(it, children = units) }
             val artifact = ProjectNode(input.name, children = listOfNotNull(container).ifEmpty { units })
-            val root = ProjectNode(projectName, children = listOf(artifact))
+            val rootChildren = buildList {
+                if (units.isNotEmpty()) add(artifact)
+                if (malformed.isNotEmpty()) {
+                    add(ProjectNode("[unknown]", children = malformed.map { ProjectNode(it.name.substringAfterLast('/'), dex = it) }))
+                }
+            }.ifEmpty { listOf(artifact) }
+            val root = ProjectNode(projectName, children = rootChildren)
 
-            return ApkSession(jadx, root, appPackage, certificates.size, manifestText)
+            return ApkSession(jadx, root, appPackage, certificates.size, manifestText, malformed, extraDexFiles)
+        }
+
+        private fun gatherDexes(input: File, isApk: Boolean, store: DexStore, extra: MutableList<File>, malformed: MutableList<MalformedDex>) {
+            fun handle(name: String, source: ByteArray, isImport: Boolean) {
+                val sha = DexPatch.sha256(source)
+                val effective = store.patch(sha)?.apply(source) ?: source
+                when {
+                    Dex.parseBroken(effective) -> malformed += MalformedDex(name, source, sha, effective, Dex.validate(effective))
+                    effective !== source || isImport -> {
+                        extra += File.createTempFile("jdex-dex", ".dex").apply { writeBytes(effective); deleteOnExit() }
+                    }
+                }
+            }
+            if (isApk) {
+                runCatching {
+                    ZipFile(input).use { zip ->
+                        zip.entries().asSequence().filter { DEX.matches(it.name) }.forEach { entry ->
+                            val bytes = zip.getInputStream(entry).use { it.readBytes() }
+                            if (Dex.parseBroken(bytes)) handle(entry.name, bytes, false)
+                        }
+                    }
+                }
+            } else {
+                runCatching { input.readBytes() }.getOrNull()?.let { handle(input.name, it, false) }
+            }
+            store.importedDexes().forEach { handle(it.name, it.bytes, true) }
         }
 
         private fun bytecode(jadx: JadxDecompiler, progress: (Int, Int) -> Unit, cancel: () -> Boolean): LineSource? {

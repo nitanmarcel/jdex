@@ -5,7 +5,42 @@ import java.security.MessageDigest
 import java.sql.Connection
 import java.sql.DriverManager
 
-class Project private constructor(val file: File, private val connection: Connection) : AutoCloseable, CommentStore, BookmarkStore, RenameStore {
+class Project private constructor(val file: File, private val connection: Connection) : AutoCloseable, CommentStore, BookmarkStore, RenameStore, DexStore {
+
+    override fun importedDexes(): List<StoredDex> {
+        val list = mutableListOf<StoredDex>()
+        connection.createStatement().use { st ->
+            st.executeQuery("SELECT sha, name, bytes FROM imported_dex").use { rs ->
+                while (rs.next()) list.add(StoredDex(rs.getString(1), rs.getString(2), rs.getBytes(3)))
+            }
+        }
+        return list
+    }
+
+    override fun patch(sha: String): DexPatch? =
+        connection.prepareStatement("SELECT patch FROM dex_patch WHERE source_sha = ?").use {
+            it.setString(1, sha)
+            it.executeQuery().use { rs -> if (rs.next()) DexPatch.deserialize(rs.getBytes(1)) else null }
+        }
+
+    override fun savePatch(sha: String, patch: DexPatch) {
+        connection.prepareStatement("INSERT OR REPLACE INTO dex_patch(source_sha, patch) VALUES(?, ?)").use {
+            it.setString(1, sha)
+            it.setBytes(2, patch.serialize())
+            it.executeUpdate()
+        }
+        save()
+    }
+
+    override fun saveImported(sha: String, name: String, bytes: ByteArray) {
+        connection.prepareStatement("INSERT OR REPLACE INTO imported_dex(sha, name, bytes) VALUES(?, ?, ?)").use {
+            it.setString(1, sha)
+            it.setString(2, name)
+            it.setBytes(3, bytes)
+            it.executeUpdate()
+        }
+        save()
+    }
 
     override fun renames(): Map<String, String> {
         val map = LinkedHashMap<String, String>()
@@ -143,6 +178,11 @@ class Project private constructor(val file: File, private val connection: Connec
                 if (version < 5) {
                     statement.executeUpdate("CREATE TABLE rename(key TEXT PRIMARY KEY, name TEXT NOT NULL)")
                     statement.executeUpdate("PRAGMA user_version = 5")
+                }
+                if (version < 6) {
+                    statement.executeUpdate("CREATE TABLE imported_dex(sha TEXT PRIMARY KEY, name TEXT NOT NULL, bytes BLOB NOT NULL)")
+                    statement.executeUpdate("CREATE TABLE dex_patch(source_sha TEXT PRIMARY KEY, patch BLOB NOT NULL)")
+                    statement.executeUpdate("PRAGMA user_version = 6")
                 }
             }
         }

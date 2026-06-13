@@ -4,6 +4,7 @@ class ProjectNode(
     val label: String,
     val open: (() -> Content)? = null,
     val children: List<ProjectNode> = emptyList(),
+    val dex: MalformedDex? = null,
 ) {
     override fun toString() = label
 }

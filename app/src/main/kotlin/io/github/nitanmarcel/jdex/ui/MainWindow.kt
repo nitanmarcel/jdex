@@ -17,7 +17,10 @@ import io.github.nitanmarcel.jdex.RecentFiles
 import io.github.nitanmarcel.jdex.project.ApkSession
 import io.github.nitanmarcel.jdex.project.CodeContent
 import io.github.nitanmarcel.jdex.project.Content
+import io.github.nitanmarcel.jdex.project.Dex
+import io.github.nitanmarcel.jdex.project.DexPatch
 import io.github.nitanmarcel.jdex.project.HMembers
+import io.github.nitanmarcel.jdex.project.MalformedDex
 import io.github.nitanmarcel.jdex.project.NoBookmarks
 import io.github.nitanmarcel.jdex.project.NoComments
 import io.github.nitanmarcel.jdex.project.NoRenames
@@ -81,7 +84,7 @@ class MainWindow : JFrame("jdex") {
         add(RootDockingPanel(this))
 
         val editors = EditorAnchor()
-        explorer = FilesPanel(::openView, onFindUsages = ::findInBytecode)
+        explorer = FilesPanel(::openView, onFindUsages = ::findInBytecode, onOpenDex = ::openDexEditor)
         hierarchy = HierarchyPanel(
             onClass = { rawName -> navigateBytecode { it.revealClass(rawName) } },
             onMethod = { rawName, shortId -> navigateBytecode { it.revealMethod(rawName, shortId) } },
@@ -117,6 +120,7 @@ class MainWindow : JFrame("jdex") {
                 accelerator = shortcut(KeyEvent.VK_O)
                 addActionListener { openWithChooser() }
             })
+            add(JMenuItem("Import DEX…").apply { addActionListener { importDex() } })
             add(recentMenu)
             addSeparator()
             add(saveItem.apply {
@@ -185,22 +189,53 @@ class MainWindow : JFrame("jdex") {
         saveItem.isEnabled = true
         title = "jdex — ${(project.input() ?: file).name}"
         log.info("Opened project ${project.file.absolutePath}")
+        analyze()
+    }
 
+    private fun analyze() {
+        val project = project ?: return
         val input = project.input() ?: return
+        session?.close()
+        session = null
+        clearEditors()
         explorer.clear()
         hierarchy.clear()
         log.info("Analyzing ${input.name}…")
         scope.launch {
-            runCatching { withContext(Dispatchers.Default) { ApkSession.load(input, project.file.name) } }
+            runCatching { withContext(Dispatchers.Default) { ApkSession.load(input, project.file.name, project) } }
                 .onSuccess { loaded ->
                     session = loaded
                     explorer.show(loaded.root)
                     hierarchy.show(loaded.topClasses())
-                    log.info("Loaded ${input.name}: package=${loaded.appPackage ?: "n/a"}, certs=${loaded.certificateCount}")
+                    val malformed = if (loaded.malformedDexes.isNotEmpty()) ", ${loaded.malformedDexes.size} malformed dex" else ""
+                    log.info("Loaded ${input.name}: package=${loaded.appPackage ?: "n/a"}, certs=${loaded.certificateCount}$malformed")
                     explorer.bytecode()?.let { (id, title, load) -> openView(id, title, load) }
                 }
                 .onFailure { log.log(Level.SEVERE, "Failed to analyze ${input.name}: ${it.message}") }
         }
+    }
+
+    private fun openDexEditor(dex: MalformedDex) {
+        DexEditorWindow(dex) { d, edited -> saveDex(d, edited) }.isVisible = true
+    }
+
+    private fun saveDex(dex: MalformedDex, edited: ByteArray) {
+        val project = project ?: return
+        project.savePatch(dex.sha, DexPatch.between(dex.source, edited))
+        log.info("Saved DEX ${dex.name} — ${if (Dex.parseBroken(edited)) "still malformed" else "valid, merging"}")
+        analyze()
+    }
+
+    private fun importDex() {
+        val project = project ?: return run { log.warning("Open an APK or project before importing a DEX") }
+        val chooser = JFileChooser(recentFiles.all().firstOrNull()?.parentFile)
+        chooser.fileFilter = FileNameExtensionFilter("DEX files (*.dex)", "dex")
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return
+        val file = chooser.selectedFile
+        val bytes = runCatching { file.readBytes() }.getOrElse { log.log(Level.SEVERE, "Cannot read ${file.name}: ${it.message}"); return }
+        project.saveImported(DexPatch.sha256(bytes), file.name, bytes)
+        log.info("Imported ${file.name} (${bytes.size} bytes)")
+        analyze()
     }
 
     private fun openView(id: String, title: String, load: () -> Content) {
