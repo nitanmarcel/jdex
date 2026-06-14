@@ -4,6 +4,7 @@ binarydata = "0.2.2"
 bined = "0.2.2"
 coroutines = "1.11.0"
 flatlaf = "3.7.1"
+graalpy = "25.0.2"
 jadx = "1.5.5"
 junit-jupiter = "6.0.1"
 kotlin = "2.3.20"
@@ -20,6 +21,11 @@ binary-data = { module = "org.exbin.auxiliary:binary_data", version.ref = "binar
 binary-data-array = { module = "org.exbin.auxiliary:binary_data-array", version.ref = "binarydata" }
 flatlaf = { module = "com.formdev:flatlaf", version.ref = "flatlaf" }
 flatlaf-extras = { module = "com.formdev:flatlaf-extras", version.ref = "flatlaf" }
+graalpy-polyglot = { module = "org.graalvm.polyglot:polyglot", version.ref = "graalpy" }
+graalpy-language = { module = "org.graalvm.python:python-language", version.ref = "graalpy" }
+graalpy-resources = { module = "org.graalvm.python:python-resources", version.ref = "graalpy" }
+graalpy-truffle-runtime = { module = "org.graalvm.truffle:truffle-runtime", version.ref = "graalpy" }
+graalpy-regex = { module = "org.graalvm.regex:regex", version.ref = "graalpy" }
 jadx-core = { module = "io.github.skylot:jadx-core", version.ref = "jadx" }
 jadx-dex-input = { module = "io.github.skylot:jadx-dex-input", version.ref = "jadx" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit-jupiter" }

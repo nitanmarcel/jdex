@@ -843,14 +843,17 @@ class VirtualCodeView(
         source.sectionAt(caret.line)?.let(onDecompile)
     }
 
-    private fun goToAddress() {
-        val input = JOptionPane.showInputDialog(this, "File offset (hex):", "Go to Address", JOptionPane.PLAIN_MESSAGE) ?: return
-        val offset = input.trim().removePrefix("0x").toLongOrNull(16) ?: return
+    fun revealOffset(offset: Long) {
         val token = "%08x:".format(offset)
         background {
             val line = source.search(token, 0, true, false)
             SwingUtilities.invokeLater { if (line != null) goToLine(line) }
         }
+    }
+
+    private fun goToAddress() {
+        val input = JOptionPane.showInputDialog(this, "File offset (hex):", "Go to Address", JOptionPane.PLAIN_MESSAGE) ?: return
+        revealOffset(input.trim().removePrefix("0x").toLongOrNull(16) ?: return)
     }
 
     private fun goToDefinition() {

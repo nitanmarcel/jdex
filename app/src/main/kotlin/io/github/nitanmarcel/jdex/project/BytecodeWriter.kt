@@ -110,6 +110,12 @@ object BytecodeWriter {
         payload(insn)?.let { return "%08x: %-18s %04x: %s".format(fileOffset, "%04x".format(insn.rawOpcodeUnit), insn.offset, it) }
 
         val prefix = "%08x: %-18s %04x:".format(fileOffset, hex(insn.byteCode), insn.offset)
+        val operands = operandText(insn, name, paramBase)
+        val resource = if (isLiteral(name)) resources[insn.literal.toInt()]?.let { " # @$it" } ?: "" else ""
+        return "$prefix ${mnemonic.padEnd(MNEMONIC_WIDTH)} $operands${comment(insn)}$resource".trimEnd()
+    }
+
+    private fun operandText(insn: InsnData, name: String, paramBase: Int): String {
         val braces = name.startsWith("INVOKE") || name.startsWith("FILLED_NEW_ARRAY")
         val registers = registers(insn, braces, name.endsWith("_RANGE"), paramBase)
         val operand = when {
@@ -124,9 +130,7 @@ object BytecodeWriter {
             isLiteral(name) -> literal(insn.literal)
             else -> null
         }
-        val operands = listOfNotNull(registers.ifEmpty { null }, operand).joinToString(", ")
-        val resource = if (isLiteral(name)) resources[insn.literal.toInt()]?.let { " # @$it" } ?: "" else ""
-        return "$prefix ${mnemonic.padEnd(MNEMONIC_WIDTH)} $operands${comment(insn)}$resource".trimEnd()
+        return listOfNotNull(registers.ifEmpty { null }, operand).joinToString(", ")
     }
 
     private fun payload(insn: InsnData): String? = when (insn.rawOpcodeUnit) {
@@ -207,5 +211,213 @@ object BytecodeWriter {
     private fun modifiers(flags: Int, scope: AccessFlagsScope): String {
         val text = AccessFlags.format(flags, scope).trim()
         return if (text.isEmpty()) "" else "$text "
+    }
+
+    private fun shortIdOf(m: IMethodData): String {
+        val ref = m.methodRef.apply { load() }
+        return "${ref.name}(${ref.argTypes.joinToString("")})${ref.returnType}"
+    }
+
+    private fun <T> withMethod(cls: JavaClass, shortId: String, block: (IMethodData) -> T): T? {
+        val data = cls.classNode?.clsData ?: return null
+        var result: T? = null
+        var found = false
+        runCatching {
+            data.visitFieldsAndMethods(
+                ISeqConsumer<IFieldData> {},
+                ISeqConsumer<IMethodData> { m -> if (!found && shortIdOf(m) == shortId) { found = true; result = block(m) } },
+            )
+        }
+        return result
+    }
+
+    fun methodShortIds(cls: JavaClass): List<String> {
+        val data = cls.classNode?.clsData ?: return emptyList()
+        val out = ArrayList<String>()
+        runCatching { data.visitFieldsAndMethods(ISeqConsumer<IFieldData> {}, ISeqConsumer<IMethodData> { out.add(shortIdOf(it)) }) }
+        return out
+    }
+
+    fun fieldNames(cls: JavaClass): List<String> {
+        val data = cls.classNode?.clsData ?: return emptyList()
+        val out = ArrayList<String>()
+        runCatching { data.visitFieldsAndMethods(ISeqConsumer<IFieldData> { out.add(it.name) }, ISeqConsumer<IMethodData> {}) }
+        return out
+    }
+
+    fun methodSmali(cls: JavaClass, shortId: String, resources: Map<Int, String>): String? =
+        withMethod(cls, shortId) { m -> StringBuilder().also { appendMethod(it, m, resources) }.toString().trim() }
+
+    fun instructions(cls: JavaClass, shortId: String, resources: Map<Int, String>): List<Map<String, Any?>>? =
+        withMethod(cls, shortId) { m ->
+            val reader = m.codeReader ?: return@withMethod emptyList()
+            val isStatic = AccessFlags.hasFlag(m.accessFlags, AccessFlags.STATIC)
+            val ref = m.methodRef.apply { load() }
+            val insSize = (if (isStatic) 0 else 1) + ref.argTypes.sumOf { if (it == "J" || it == "D") 2 else 1 }
+            val paramBase = reader.registersCount - insSize
+            val codeBase = reader.codeOffset
+            val lines = reader.debugInfo?.sourceLineMapping ?: emptyMap()
+            val rows = ArrayList<Map<String, Any?>>()
+            reader.visitInstructions { insn ->
+                insn.decode()
+                val name = insn.opcode?.name ?: ""
+                val payload = payload(insn)
+                val operands = payload ?: operandText(insn, name, paramBase)
+                val resource = if (payload == null && isLiteral(name)) resources[insn.literal.toInt()]?.let { "@$it" } else null
+                rows.add(
+                    linkedMapOf(
+                        "offset" to insn.offset,
+                        "addr" to (codeBase + insn.offset * 2),
+                        "line" to lines[insn.offset],
+                        "mnemonic" to insn.opcodeMnemonic,
+                        "operands" to operands,
+                        "comment" to comment(insn).removePrefix(" # ").trim().ifEmpty { null },
+                        "resource" to resource,
+                    )
+                )
+            }
+            rows
+        }
+
+    fun stringRefs(cls: JavaClass): List<Pair<String, String>> {
+        val data = cls.classNode?.clsData ?: return emptyList()
+        val out = ArrayList<Pair<String, String>>()
+        runCatching {
+            data.visitFieldsAndMethods(
+                ISeqConsumer<IFieldData> {},
+                ISeqConsumer<IMethodData> { m ->
+                    val shortId = shortIdOf(m)
+                    m.codeReader?.let { reader ->
+                        runCatching {
+                            reader.visitInstructions { insn ->
+                                insn.decode()
+                                if (insn.indexType == InsnIndexType.STRING_REF) runCatching { out.add(shortId to insn.indexAsString) }
+                            }
+                        }
+                    }
+                },
+            )
+        }
+        return out
+    }
+
+    fun scanCode(cls: JavaClass, rx: Regex): List<Triple<String, Int, String>> {
+        val data = cls.classNode?.clsData ?: return emptyList()
+        val out = ArrayList<Triple<String, Int, String>>()
+        runCatching {
+            data.visitFieldsAndMethods(
+                ISeqConsumer<IFieldData> {},
+                ISeqConsumer<IMethodData> { m ->
+                    val reader = m.codeReader ?: return@ISeqConsumer
+                    val shortId = shortIdOf(m)
+                    val isStatic = AccessFlags.hasFlag(m.accessFlags, AccessFlags.STATIC)
+                    val insSize = (if (isStatic) 0 else 1) + m.methodRef.argTypes.sumOf { if (it == "J" || it == "D") 2 else 1 }
+                    val paramBase = reader.registersCount - insSize
+                    runCatching {
+                        reader.visitInstructions { insn ->
+                            insn.decode()
+                            val name = insn.opcode?.name ?: ""
+                            val text = "${insn.opcodeMnemonic} ${payload(insn) ?: operandText(insn, name, paramBase)}".trim()
+                            if (rx.containsMatchIn(text)) out.add(Triple(shortId, insn.offset, text))
+                        }
+                    }
+                },
+            )
+        }
+        return out
+    }
+
+    fun fieldAccessIn(cls: JavaClass, shortId: String, fieldClassDesc: String, fieldName: String): Pair<Boolean, Boolean> =
+        withMethod(cls, shortId) { m ->
+            var reads = false
+            var writes = false
+            m.codeReader?.let { reader ->
+                runCatching {
+                    reader.visitInstructions { insn ->
+                        insn.decode()
+                        if (insn.indexType == InsnIndexType.FIELD_REF) {
+                            val f = insn.indexAsField
+                            if (f.name == fieldName && f.parentClassType == fieldClassDesc) {
+                                val n = insn.opcode?.name ?: ""
+                                if (n.startsWith("IPUT") || n.startsWith("SPUT")) writes = true
+                                if (n.startsWith("IGET") || n.startsWith("SGET")) reads = true
+                            }
+                        }
+                    }
+                }
+            }
+            reads to writes
+        } ?: (false to false)
+
+    fun strings(cls: JavaClass): List<String> {
+        val data = cls.classNode?.clsData ?: return emptyList()
+        val seen = LinkedHashSet<String>()
+        runCatching {
+            data.visitFieldsAndMethods(
+                ISeqConsumer<IFieldData> {},
+                ISeqConsumer<IMethodData> { m ->
+                    m.codeReader?.let { reader ->
+                        runCatching {
+                            reader.visitInstructions { insn ->
+                                insn.decode()
+                                if (insn.indexType == InsnIndexType.STRING_REF) runCatching { seen.add(insn.indexAsString) }
+                            }
+                        }
+                    }
+                },
+            )
+        }
+        return seen.toList()
+    }
+
+    fun classInfo(cls: JavaClass): Map<String, Any?> {
+        val data = cls.classNode?.clsData
+        val flags = data?.accessFlags ?: 0
+        return linkedMapOf(
+            "descriptor" to "L${cls.rawName.replace('.', '/')};",
+            "name" to cls.rawName.substringAfterLast('.'),
+            "package" to cls.rawName.substringBeforeLast('.', ""),
+            "super" to data?.superType,
+            "interfaces" to (data?.interfacesTypes ?: emptyList<String>()),
+            "access_flags" to flags,
+            "modifiers" to AccessFlags.format(flags, AccessFlagsScope.CLASS).trim(),
+        )
+    }
+
+    fun methodInfo(cls: JavaClass, shortId: String): Map<String, Any?>? =
+        withMethod(cls, shortId) { m ->
+            val ref = m.methodRef.apply { load() }
+            linkedMapOf(
+                "descriptor" to "L${cls.rawName.replace('.', '/')};->$shortId",
+                "name" to ref.name,
+                "signature" to shortId,
+                "return_type" to ref.returnType,
+                "arg_types" to ref.argTypes.toList(),
+                "access_flags" to m.accessFlags,
+                "modifiers" to AccessFlags.format(m.accessFlags, AccessFlagsScope.METHOD).trim(),
+                "registers" to (m.codeReader?.registersCount ?: 0),
+            )
+        }
+
+    fun fieldInfo(cls: JavaClass, name: String): Map<String, Any?>? {
+        val data = cls.classNode?.clsData ?: return null
+        var result: Map<String, Any?>? = null
+        runCatching {
+            data.visitFieldsAndMethods(
+                ISeqConsumer<IFieldData> { f ->
+                    if (result == null && f.name == name) {
+                        result = linkedMapOf(
+                            "descriptor" to "L${cls.rawName.replace('.', '/')};->${f.name}",
+                            "name" to f.name,
+                            "type" to f.type,
+                            "access_flags" to f.accessFlags,
+                            "modifiers" to AccessFlags.format(f.accessFlags, AccessFlagsScope.FIELD).trim(),
+                        )
+                    }
+                },
+                ISeqConsumer<IMethodData> {},
+            )
+        }
+        return result
     }
 }

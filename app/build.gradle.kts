@@ -1,3 +1,5 @@
+import java.util.zip.ZipFile
+
 plugins {
     alias(libs.plugins.kotlin.jvm)
     application
@@ -16,6 +18,11 @@ dependencies {
     implementation(libs.binary.data.array)
     implementation(libs.flatlaf)
     implementation(libs.flatlaf.extras)
+    implementation(libs.graalpy.polyglot)
+    implementation(libs.graalpy.language)
+    implementation(libs.graalpy.resources)
+    implementation(libs.graalpy.truffle.runtime)
+    implementation(libs.graalpy.regex)
     implementation(libs.jadx.core)
     implementation(libs.jadx.dex.input)
     implementation(libs.kotlinx.coroutines.swing)
@@ -47,4 +54,17 @@ tasks.shadowJar {
     archiveBaseName = "jdex"
     archiveClassifier = ""
     archiveVersion = ""
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    mergeServiceFiles()
+    val builtJar = archiveFile
+    doLast {
+        val zip = ZipFile(builtJar.get().asFile)
+        val langs = zip.use {
+            val e = it.getEntry("META-INF/services/com.oracle.truffle.api.provider.TruffleLanguageProvider")
+            it.getInputStream(e).bufferedReader().use { r -> r.readText() }
+        }
+        listOf("PythonLanguageProvider", "RegexLanguageProvider").forEach {
+            check(langs.contains(it)) { "shadowJar dropped $it from the Truffle language registry" }
+        }
+    }
 }

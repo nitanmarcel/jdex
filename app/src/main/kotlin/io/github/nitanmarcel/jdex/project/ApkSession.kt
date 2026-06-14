@@ -9,6 +9,7 @@ import jadx.api.JavaField
 import jadx.api.JavaMethod
 import jadx.api.ResourceFile
 import jadx.api.ResourceType
+import jadx.api.metadata.annotations.InsnCodeOffset
 import jadx.api.metadata.annotations.NodeDeclareRef
 import java.io.File
 import java.security.MessageDigest
@@ -24,7 +25,22 @@ class ApkSession private constructor(
     private val manifestText: String,
     val malformedDexes: List<MalformedDex>,
     private val tempDexFiles: List<File>,
+    private val input: File,
 ) : AutoCloseable {
+
+    private val inputIsZip by lazy { runCatching { ZipFile(input).use {} }.isSuccess }
+
+    fun entryNames(): List<String> = runCatching {
+        if (inputIsZip) ZipFile(input).use { zip ->
+            zip.entries().asSequence().filterNot { it.isDirectory }.map { it.name }.toList()
+        } else listOf(input.name)
+    }.getOrDefault(emptyList())
+
+    fun readFile(name: String): ByteArray = runCatching {
+        if (inputIsZip) ZipFile(input).use { zip ->
+            zip.getEntry(name)?.let { e -> zip.getInputStream(e).use { it.readBytes() } } ?: ByteArray(0)
+        } else if (name == input.name) input.readBytes() else ByteArray(0)
+    }.getOrDefault(ByteArray(0))
 
     fun mainActivity(): String? = runCatching {
         if (manifestText.isBlank()) return@runCatching null
@@ -185,6 +201,138 @@ class ApkSession private constructor(
         return "${method.declaringClass.rawName}#$shortId"
     }
 
+    fun decompiler(): JadxDecompiler = jadx
+
+    fun classRawNames(): List<String> = classesByRawName.keys.sorted()
+
+    fun classNode(rawName: String): JavaClass? = classesByRawName[rawName]
+
+    private fun resourceNames(): Map<Int, String> =
+        runCatching { jadx.root.constValues.resourcesNames }.getOrDefault(emptyMap())
+
+    fun smali(rawName: String): String? =
+        classNode(rawName)?.let { runCatching { BytecodeWriter.forClass(it, resourceNames()) }.getOrNull() }
+
+    fun javaSource(rawName: String): String? = decompile(rawName)?.code
+
+    fun classSuper(rawName: String): String? = classNode(rawName)?.classNode?.clsData?.superType
+
+    fun classInterfaces(rawName: String): List<String> =
+        classNode(rawName)?.classNode?.clsData?.interfacesTypes ?: emptyList()
+
+    private fun descOf(rawName: String): String = "L${rawName.replace('.', '/')};"
+
+    fun findMethods(pattern: String): List<String> {
+        val rx = runCatching { Regex(pattern) }.getOrNull() ?: return emptyList()
+        return classesByRawName.values.flatMap { cls ->
+            val desc = descOf(cls.rawName)
+            BytecodeWriter.methodShortIds(cls).map { "$desc->$it" }
+        }.filter { rx.containsMatchIn(it) }
+    }
+
+    fun findFields(pattern: String): List<String> {
+        val rx = runCatching { Regex(pattern) }.getOrNull() ?: return emptyList()
+        return classesByRawName.values.flatMap { cls ->
+            val desc = descOf(cls.rawName)
+            BytecodeWriter.fieldNames(cls).map { "$desc->$it" }
+        }.filter { rx.containsMatchIn(it) }
+    }
+
+    fun methodSmali(rawName: String, shortId: String): String? =
+        classNode(rawName)?.let { BytecodeWriter.methodSmali(it, shortId, resourceNames()) }
+
+    fun methodInstructions(rawName: String, shortId: String): List<Map<String, Any?>>? =
+        classNode(rawName)?.let { BytecodeWriter.instructions(it, shortId, resourceNames()) }
+
+    fun classStrings(rawName: String): List<String> =
+        classNode(rawName)?.let { BytecodeWriter.strings(it) } ?: emptyList()
+
+    fun classInfo(rawName: String): Map<String, Any?>? =
+        classNode(rawName)?.let { BytecodeWriter.classInfo(it) }
+
+    fun methodInfo(rawName: String, shortId: String): Map<String, Any?>? =
+        classNode(rawName)?.let { BytecodeWriter.methodInfo(it, shortId) }
+
+    fun fieldInfo(rawName: String, name: String): Map<String, Any?>? =
+        classNode(rawName)?.let { BytecodeWriter.fieldInfo(it, name) }
+
+    fun searchCode(pattern: String, limit: Int): List<Map<String, Any?>> {
+        val rx = runCatching { Regex(pattern) }.getOrNull() ?: return emptyList()
+        val out = ArrayList<Map<String, Any?>>()
+        for (cls in classesByRawName.values) {
+            val desc = descOf(cls.rawName)
+            for ((shortId, offset, text) in BytecodeWriter.scanCode(cls, rx)) {
+                out.add(linkedMapOf("method" to "$desc->$shortId", "offset" to offset, "text" to text))
+                if (out.size >= limit) return out
+            }
+        }
+        return out
+    }
+
+    fun allStrings(): List<Map<String, Any?>> {
+        val out = ArrayList<Map<String, Any?>>()
+        for (cls in classesByRawName.values) {
+            val desc = descOf(cls.rawName)
+            for ((shortId, value) in BytecodeWriter.stringRefs(cls)) {
+                out.add(linkedMapOf("value" to value, "method" to "$desc->$shortId"))
+            }
+        }
+        return out
+    }
+
+    fun fieldAccess(fieldDesc: String, write: Boolean): List<String> {
+        val usages = usages(Symbol(SymbolKind.FIELD, fieldDesc)) ?: return emptyList()
+        val fieldClassDesc = fieldDesc.substringBefore("->")
+        val fieldName = fieldDesc.substringAfter("->").substringBefore(':')
+        val result = LinkedHashSet<String>()
+        for (u in usages) {
+            val shortId = u.shortId ?: continue
+            val cls = classesByRawName[u.rawName] ?: continue
+            val (reads, writes) = BytecodeWriter.fieldAccessIn(cls, shortId, fieldClassDesc, fieldName)
+            if (if (write) writes else reads) result.add("${descOf(u.rawName)}->$shortId")
+        }
+        return result.toList()
+    }
+
+    fun offsetAtLine(rawName: String, line: Int): Int? {
+        val cls = classesByRawName[rawName] ?: return null
+        val info = runCatching { cls.topParentClass.codeInfo }.getOrNull() ?: return null
+        if (!info.hasMetadata()) return null
+        val starts = lineStarts(info.codeStr)
+        val from = starts.getOrNull(line - 1) ?: return null
+        val to = starts.getOrNull(line) ?: info.codeStr.length
+        var best: Int? = null
+        var bestPos = Int.MAX_VALUE
+        for ((pos, ann) in info.codeMetadata.asMap) {
+            if (ann is InsnCodeOffset && pos in from until to && pos < bestPos) {
+                bestPos = pos
+                best = ann.offset
+            }
+        }
+        return best
+    }
+
+    fun manifest(): String = manifestText
+
+    private fun manifestDoc(): org.w3c.dom.Document? = runCatching {
+        if (manifestText.isBlank()) null
+        else javax.xml.parsers.DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(manifestText.byteInputStream())
+    }.getOrNull()
+
+    private fun manifestNames(tag: String): List<org.w3c.dom.Element> {
+        val doc = manifestDoc() ?: return emptyList()
+        val nodes = doc.getElementsByTagName(tag)
+        return (0 until nodes.length).map { nodes.item(it) as org.w3c.dom.Element }
+    }
+
+    fun permissions(): List<String> = manifestNames("uses-permission")
+        .mapNotNull { it.getAttribute("android:name").ifEmpty { it.getAttribute("name") }.ifEmpty { null } }
+        .distinct()
+
+    fun components(tag: String): List<String> = manifestNames(tag)
+        .mapNotNull { resolveActivity(it.getAttribute("android:name").ifEmpty { it.getAttribute("name") }) }
+        .distinct()
+
     fun topClasses(): List<HClass> =
         jadx.classes.map { HClass(it.rawName, it.fullName, it.getPackage(), it.name) }
 
@@ -293,7 +441,7 @@ class ApkSession private constructor(
             }.ifEmpty { listOf(artifact) }
             val root = ProjectNode(projectName, children = rootChildren)
 
-            return ApkSession(jadx, root, appPackage, certificates.size, manifestText, malformed, extraDexFiles)
+            return ApkSession(jadx, root, appPackage, certificates.size, manifestText, malformed, extraDexFiles, input)
         }
 
         private fun gatherDexes(input: File, isApk: Boolean, store: DexStore, extra: MutableList<File>, malformed: MutableList<MalformedDex>) {

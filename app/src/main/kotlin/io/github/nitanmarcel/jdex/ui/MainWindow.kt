@@ -23,9 +23,12 @@ import io.github.nitanmarcel.jdex.project.HMembers
 import io.github.nitanmarcel.jdex.project.MalformedDex
 import io.github.nitanmarcel.jdex.project.NoBookmarks
 import io.github.nitanmarcel.jdex.project.NoComments
+import io.github.nitanmarcel.jdex.project.NoDexStore
 import io.github.nitanmarcel.jdex.project.NoRenames
 import io.github.nitanmarcel.jdex.project.Project
 import io.github.nitanmarcel.jdex.project.Renames
+import io.github.nitanmarcel.jdex.project.ScriptApi
+import io.github.nitanmarcel.jdex.project.ScriptUi
 import io.github.nitanmarcel.jdex.project.TextContent
 import java.awt.Dimension
 import java.awt.Toolkit
@@ -37,6 +40,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.logging.Level
 import java.util.logging.Logger
 import javax.swing.JFileChooser
+import javax.swing.JOptionPane
 import javax.swing.SwingUtilities
 import javax.swing.JFrame
 import javax.swing.JMenu
@@ -64,6 +68,7 @@ class MainWindow : JFrame("jdex") {
     private var syncState = FlatTriStateCheckBox.State.UNSELECTED
     private var bytecodeTab: EditorTab? = null
     private var bytecodeView: VirtualCodeView? = null
+    private lateinit var scripting: ScriptPanel
 
     init {
         defaultCloseOperation = EXIT_ON_CLOSE
@@ -75,6 +80,7 @@ class MainWindow : JFrame("jdex") {
                 runCatching { clearEditors() }
                 runCatching { AppState.persist() }
                 runCatching { scope.cancel() }
+                runCatching { scripting.close() }
                 runCatching { session?.close() }
                 runCatching { project?.close() }
             }
@@ -95,8 +101,42 @@ class MainWindow : JFrame("jdex") {
             onRenamed = { renamesChanged() },
         )
         val logger = LoggerPanel()
+        scripting = ScriptPanel(ScriptApi(
+            session = { session },
+            renameStore = { project ?: NoRenames },
+            onChanged = { SwingUtilities.invokeLater { renamesChanged() } },
+            dexStore = { project ?: NoDexStore },
+            onReanalyze = { SwingUtilities.invokeLater { analyze() } },
+            importer = { name, bytes ->
+                SwingUtilities.invokeLater {
+                    project?.let { it.saveImported(DexPatch.sha256(bytes), name, bytes); analyze() }
+                        ?: log.warning("Open an APK or project before importing a DEX")
+                }
+            },
+            ui = object : ScriptUi {
+                override fun message(text: String, error: Boolean) = SwingUtilities.invokeLater {
+                    JOptionPane.showMessageDialog(
+                        this@MainWindow, text, "Script",
+                        if (error) JOptionPane.ERROR_MESSAGE else JOptionPane.INFORMATION_MESSAGE,
+                    )
+                }
 
-        jMenuBar = createMenuBar(editors, explorer, hierarchy, logger)
+                override fun input(prompt: String, default: String): String? =
+                    onEdt { JOptionPane.showInputDialog(this@MainWindow, prompt, default) }
+
+                override fun confirm(text: String): Boolean = onEdt {
+                    JOptionPane.showConfirmDialog(this@MainWindow, text, "Script", JOptionPane.YES_NO_OPTION) ==
+                        JOptionPane.YES_OPTION
+                }
+
+                override fun gotoOffset(offset: Long) =
+                    SwingUtilities.invokeLater { navigateBytecode { it.revealOffset(offset) } }
+
+                override fun open(desc: String) = SwingUtilities.invokeLater { openDescriptor(desc) }
+            },
+        ))
+
+        jMenuBar = createMenuBar(editors, explorer, hierarchy, logger, scripting)
         updateRecentMenu()
 
         AppState.setAutoPersist(false)
@@ -107,20 +147,24 @@ class MainWindow : JFrame("jdex") {
                 .dock("editors", "project_explorer", DockingRegion.EAST, 0.8)
                 .dock("hierarchy", "project_explorer", DockingRegion.SOUTH, 0.5)
                 .dockToRoot("logger", DockingRegion.SOUTH, 0.25)
+                .dock("scripting", "logger", DockingRegion.CENTER)
                 .buildApplicationLayout()
         )
 
         runCatching { AppState.restore() }
             .onFailure { log.warning("Discarded incompatible saved layout") }
+
+        if (Docking.isDocked(logger)) Docking.bringToFront(logger)
     }
 
-    private fun createMenuBar(editors: EditorAnchor, explorer: FilesPanel, hierarchy: HierarchyPanel, logger: LoggerPanel) = JMenuBar().apply {
+    private fun createMenuBar(editors: EditorAnchor, explorer: FilesPanel, hierarchy: HierarchyPanel, logger: LoggerPanel, scripting: ScriptPanel) = JMenuBar().apply {
         add(JMenu("File").apply {
             add(JMenuItem("Open…").apply {
                 accelerator = shortcut(KeyEvent.VK_O)
                 addActionListener { openWithChooser() }
             })
             add(JMenuItem("Import DEX…").apply { addActionListener { importDex() } })
+            add(JMenuItem("Run Script…").apply { addActionListener { runScript() } })
             add(recentMenu)
             addSeparator()
             add(saveItem.apply {
@@ -150,6 +194,10 @@ class MainWindow : JFrame("jdex") {
             })
             add(viewItem("Logger", logger) {
                 Docking.dock(logger, this@MainWindow, DockingRegion.SOUTH, 0.25)
+            })
+            add(viewItem("Scripting", scripting) {
+                if (Docking.isDocked(logger)) Docking.dock(scripting, logger, DockingRegion.CENTER)
+                else Docking.dock(scripting, this@MainWindow, DockingRegion.SOUTH, 0.25)
             })
         })
     }
@@ -236,6 +284,14 @@ class MainWindow : JFrame("jdex") {
         project.saveImported(DexPatch.sha256(bytes), file.name, bytes)
         log.info("Imported ${file.name} (${bytes.size} bytes)")
         analyze()
+    }
+
+    private fun runScript() {
+        val chooser = JFileChooser(recentFiles.all().firstOrNull()?.parentFile)
+        chooser.fileFilter = FileNameExtensionFilter("Python scripts (*.py)", "py")
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) return
+        if (Docking.isDocked(scripting)) Docking.bringToFront(scripting)
+        scripting.runFile(chooser.selectedFile)
     }
 
     private fun openView(id: String, title: String, load: () -> Content) {
@@ -332,6 +388,23 @@ class MainWindow : JFrame("jdex") {
         val tab = bytecodeTab ?: return
         if (Docking.isDocked(tab)) Docking.bringToFront(tab)
         bytecodeView?.search(query)
+    }
+
+    private fun <T> onEdt(block: () -> T): T {
+        if (SwingUtilities.isEventDispatchThread()) return block()
+        val ref = java.util.concurrent.atomic.AtomicReference<T>()
+        SwingUtilities.invokeAndWait { ref.set(block()) }
+        return ref.get()
+    }
+
+    private fun openDescriptor(desc: String) {
+        val raw = desc.substringBefore("->").removePrefix("L").removeSuffix(";").replace('/', '.')
+        val member = desc.substringAfter("->", "")
+        when {
+            member.isEmpty() -> navigateBytecode { it.revealClass(raw) }
+            '(' in member -> navigateBytecode { it.revealMethod(raw, member) }
+            else -> navigateBytecode { it.revealField(raw, member.substringBefore(":")) }
+        }
     }
 
     private fun navigateBytecode(action: (VirtualCodeView) -> Unit) {
