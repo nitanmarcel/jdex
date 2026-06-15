@@ -22,7 +22,7 @@ class CodeTextArea(text: String, syntax: Syntax) : RSyntaxTextArea() {
     companion object {
         fun registerSyntaxStyles() {
             val factory = TokenMakerFactory.getDefaultInstance() as AbstractTokenMakerFactory
-            factory.putMapping("text/smali", "io.github.nitanmarcel.jdex.syntax.SmaliTokenMaker")
+            factory.putMapping("text/smali", "io.github.nitanmarcel.jdex.syntax.BytecodeTokenMaker")
         }
     }
 }

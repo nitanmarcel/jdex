@@ -35,14 +35,28 @@ class DiskLineSource private constructor(
     private val sectionNames: Array<String>,
 ) : LineSource {
 
-    private var cacheFrom = -1
-    private var cache: List<String> = emptyList()
+    private val lock = Any()
+    private val chunkCache = object : LinkedHashMap<Int, List<String>>(MAX_CHUNKS * 2, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Int, List<String>>): Boolean = size > MAX_CHUNKS
+    }
 
     override fun lines(from: Int, count: Int): List<String> {
         if (count <= 0 || from >= lineCount || from < 0) return emptyList()
         val n = count.coerceAtMost(lineCount - from)
-        if (from == cacheFrom && cache.size >= n) return cache.subList(0, n)
+        synchronized(lock) {
+            val chunkStart = (from / stride) * stride
+            if (from + n <= chunkStart + stride) {
+                val chunk = chunkCache.getOrPut(chunkStart) { readDirect(chunkStart, stride) }
+                val lo = from - chunkStart
+                if (lo + n <= chunk.size) return ArrayList(chunk.subList(lo, lo + n))
+            }
+            return readDirect(from, n)
+        }
+    }
 
+    private fun readDirect(from: Int, count: Int): List<String> {
+        val n = count.coerceAtMost(lineCount - from).coerceAtLeast(0)
+        if (n == 0) return emptyList()
         val idx = (from / stride).coerceIn(0, offsets.size - 1)
         val baseLine = idx * stride
         val result = ArrayList<String>(n)
@@ -53,8 +67,6 @@ class DiskLineSource private constructor(
                 repeat(n) { result.add(reader.readLine() ?: return@use) }
             }
         }
-        cacheFrom = from
-        cache = result
         return result
     }
 
@@ -132,6 +144,7 @@ class DiskLineSource private constructor(
 
     companion object {
         private const val NL = '\n'.code.toByte()
+        private const val MAX_CHUNKS = 16
 
         fun build(chunks: Sequence<LabeledChunk>, stride: Int = 256): DiskLineSource {
             val file = File.createTempFile("jdex-code", ".txt").apply { deleteOnExit() }

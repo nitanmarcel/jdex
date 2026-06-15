@@ -86,6 +86,10 @@ class VirtualCodeView(
     private var selectionColor: Color = Color(0xAD, 0xD6, 0xFF)
     private var gutterColor: Color = Color.GRAY
     private var currentLineColor: Color = Color(0, 0, 0, 20)
+    private var hoverColor: Color = Color(0, 0, 0, 16)
+    private var hoverLine = -1
+    private var hoverArrowSrc = -1
+    private var hoverArrowTgt = -1
     private var commentColor: Color = Color(0x00, 0x80, 0x00)
     private var highlightColor: Color = Color(0xFF, 0xD5, 0x4F, 110)
     private var bookmarkColor: Color = Color(0x2E, 0x86, 0xDE)
@@ -123,6 +127,7 @@ class VirtualCodeView(
         selectionColor = t.selectionBG ?: Color(0xAD, 0xD6, 0xFF)
         gutterColor = Color(foreground.red, foreground.green, foreground.blue, 128)
         currentLineColor = Color(foreground.red, foreground.green, foreground.blue, 20)
+        hoverColor = Color(foreground.red, foreground.green, foreground.blue, 45)
         commentColor = scheme.getStyle(TokenTypes.COMMENT_EOL)?.foreground ?: Color(0x00, 0x80, 0x00)
         val accent = UiColors.accent()
         highlightColor = UiColors.alpha(accent, 96)
@@ -177,7 +182,7 @@ class VirtualCodeView(
     private fun methodKeyAt(index: Int): String? {
         val section = source.sectionAt(index) ?: return null
         val start = source.sectionStart(section) ?: return null
-        val from = maxOf(start, index - 600)
+        val from = start
         var shortId: String? = null
         source.lines(from, index - from + 1).forEach {
             val t = it.trimStart()
@@ -198,7 +203,7 @@ class VirtualCodeView(
     }
 
     private fun posAt(x: Int, y: Int): Pos {
-        val line = (topLine + y / lineHeight).coerceIn(0, source.lineCount - 1)
+        val line = (topLine + y / lineHeight).coerceIn(0, (source.lineCount - 1).coerceAtLeast(0))
         val col = ((x + xOffset + charWidth / 2) / charWidth).coerceIn(0, lineText(line).length)
         return Pos(line, col)
     }
@@ -212,9 +217,10 @@ class VirtualCodeView(
     }
 
     private fun moveCaret(line: Int, col: Int, extend: Boolean) {
-        val l = line.coerceIn(0, source.lineCount - 1)
+        val l = line.coerceIn(0, (source.lineCount - 1).coerceAtLeast(0))
         caret = Pos(l, col.coerceIn(0, lineText(l).length))
         if (!extend) anchor = caret
+        if (!extend) highlight = wordAt(lineText(caret.line), caret.col)
         ensureCaretVisible()
         surface.repaint()
         gutter.repaint()
@@ -223,7 +229,7 @@ class VirtualCodeView(
 
     fun goToLine(line: Int, focusSurface: Boolean = true) {
         if (graphView != null) showText()
-        if (caret.line != line.coerceIn(0, source.lineCount - 1)) {
+        if (caret.line != line.coerceIn(0, (source.lineCount - 1).coerceAtLeast(0))) {
             backStack.addLast(caret.line)
             forwardStack.clear()
         }
@@ -231,7 +237,7 @@ class VirtualCodeView(
     }
 
     private fun moveTo(line: Int, focusSurface: Boolean) {
-        val l = line.coerceIn(0, source.lineCount - 1)
+        val l = line.coerceIn(0, (source.lineCount - 1).coerceAtLeast(0))
         caret = Pos(l, 0)
         anchor = caret
         val visible = visibleLines()
@@ -269,7 +275,7 @@ class VirtualCodeView(
 
     private fun sourceLineAt(index: Int): Int? {
         val start = source.sectionStart(source.sectionAt(index) ?: return null) ?: return null
-        val from = maxOf(start, index - 600)
+        val from = start
         var sourceLine: Int? = null
         source.lines(from, index - from + 1).forEach {
             val t = it.trimStart()
@@ -401,6 +407,10 @@ class VirtualCodeView(
                 val line = (if (!renames.hasAny()) raw else renames.display(raw, { source.sectionAt(index) }, { curMethod })).replace("\t", "    ")
                 val y = k * lineHeight
 
+                if ((index == hoverLine || index == hoverArrowSrc || index == hoverArrowTgt) && index != caret.line) {
+                    g.color = hoverColor
+                    g.fillRect(0, y, width, lineHeight)
+                }
                 if (index == syncHighlightLine) {
                     g.color = syncColor
                     g.fillRect(0, y, width, lineHeight)
@@ -458,7 +468,7 @@ class VirtualCodeView(
             var col = 0
             while (token != null && token.isPaintable()) {
                 val text = token.lexeme
-                g.color = scheme.getStyle(token.type)?.foreground ?: foreground
+                g.color = io.github.nitanmarcel.jdex.syntax.BytecodeStyle.color(token.type, scheme, foreground, background)
                 g.drawString(text, col * charWidth - xOffset, baseline)
                 col += text.length
                 token = token.nextToken
@@ -467,10 +477,59 @@ class VirtualCodeView(
     }
 
     private inner class Gutter : JComponent() {
-        private val width = getFontMetrics(codeFont).charWidth('0') * (source.lineCount.coerceAtLeast(1).toString().length + 2)
+        private val maxLanes = 4
+        private val laneStep = 6
+        private val arrowStrip = 12 + maxLanes * laneStep
+        private val digitsW = getFontMetrics(codeFont).charWidth('0') * (source.lineCount.coerceAtLeast(1).toString().length + 2)
+        private val width = digitsW + arrowStrip
+
+        private var hovered = -1
 
         init {
             isOpaque = true
+            val mouse = object : MouseAdapter() {
+                override fun mouseClicked(e: MouseEvent) {
+                    val idx = arrowAt(e.x, e.y)
+                    if (idx >= 0) { goToLine(arrowList[idx][1]); return }
+                    val line = topLine + e.y / lineHeight
+                    if (line in 0 until source.lineCount) gotoBranchFrom(line)
+                }
+
+                override fun mouseMoved(e: MouseEvent) {
+                    val idx = arrowAt(e.x, e.y)
+                    if (idx != hovered) {
+                        hovered = idx
+                        if (idx >= 0) { hoverArrowSrc = arrowList[idx][0]; hoverArrowTgt = arrowList[idx][1] }
+                        else { hoverArrowSrc = -1; hoverArrowTgt = -1 }
+                        repaint(); surface.repaint()
+                    }
+                    val line = topLine + e.y / lineHeight
+                    val branchRow = line in 0 until source.lineCount && (branchTarget(rawLineText(line))?.get(1) ?: -1) >= 0
+                    cursor = java.awt.Cursor.getPredefinedCursor(if (idx >= 0 || branchRow) java.awt.Cursor.HAND_CURSOR else java.awt.Cursor.DEFAULT_CURSOR)
+                }
+
+                override fun mouseExited(e: MouseEvent) {
+                    if (hovered != -1) { hovered = -1; hoverArrowSrc = -1; hoverArrowTgt = -1; repaint(); surface.repaint() }
+                }
+            }
+            addMouseListener(mouse)
+            addMouseMotionListener(mouse)
+        }
+
+        private fun laneXof(lane: Int) = digitsW + 5 + lane * laneStep
+
+        private fun arrowAt(mx: Int, my: Int): Int {
+            val arrows = branchArrows(height / lineHeight + 1)
+            for ((idx, a) in arrows.withIndex()) {
+                val laneX = laneXof(a[3])
+                val srcY = (a[0] - topLine) * lineHeight + lineHeight / 2
+                val tgtY = (a[1] - topLine) * lineHeight + lineHeight / 2
+                val top = minOf(srcY, tgtY).coerceAtLeast(0)
+                val bot = maxOf(srcY, tgtY).coerceAtMost(height)
+                if (kotlin.math.abs(mx - laneX) <= 4 && my in (top - 2)..(bot + 2)) return idx
+                if (mx in laneX..width && (kotlin.math.abs(my - srcY) <= 3 || kotlin.math.abs(my - tgtY) <= 3)) return idx
+            }
+            return -1
         }
 
         override fun getPreferredSize() = Dimension(width, 0)
@@ -491,9 +550,91 @@ class VirtualCodeView(
                 }
                 g.color = if (index == caret.line) foreground else gutterColor
                 val label = (index + 1).toString()
-                g.drawString(label, width - fm.charWidth('0') - fm.stringWidth(label), k * lineHeight + ascent)
+                g.drawString(label, digitsW - fm.charWidth('0') - fm.stringWidth(label), k * lineHeight + ascent)
+            }
+            paintBranchArrows(g as Graphics2D, visible)
+        }
+
+        private var arrowTop = -2
+        private var arrowVisible = -1
+        private var arrowList: List<IntArray> = emptyList()
+
+        private fun branchArrows(visible: Int): List<IntArray> {
+            if (topLine == arrowTop && visible == arrowVisible) return arrowList
+            arrowTop = topLine; arrowVisible = visible
+            val pad = 300
+            val winStart = (topLine - pad).coerceAtLeast(0)
+            val winEnd = (topLine + visible + pad).coerceAtMost(source.lineCount)
+            val winLen = winEnd - winStart
+            arrowList = if (winLen <= 0) emptyList() else {
+                val wlines = source.lines(winStart, winLen)
+                val offToAbs = HashMap<Long, Int>()
+                val branches = ArrayList<IntArray>()
+                var methodId = 0
+                for (j in 0 until winLen) {
+                    val line = wlines.getOrNull(j) ?: continue
+                    if (line.trimStart().startsWith(".method")) methodId++
+                    val bd = branchTarget(line) ?: continue
+                    offToAbs[(methodId.toLong() shl 20) or bd[0].toLong()] = winStart + j
+                    if (bd[1] >= 0) branches.add(intArrayOf(winStart + j, bd[0], bd[1], methodId))
+                }
+                val viewBot = topLine + visible
+                val base = branches.mapNotNull { b ->
+                    val tgtAbs = offToAbs[(b[3].toLong() shl 20) or b[2].toLong()] ?: return@mapNotNull null
+                    val lo = minOf(b[0], tgtAbs); val hi = maxOf(b[0], tgtAbs)
+                    if (hi < topLine || lo > viewBot) null
+                    else intArrayOf(b[0], tgtAbs, if (b[2] < b[1]) 1 else 0)
+                }.sortedBy { minOf(it[0], it[1]) }
+                val laneUntil = IntArray(maxLanes) { Int.MIN_VALUE }
+                base.map { a ->
+                    val loK = minOf(a[0], a[1]).coerceAtLeast(topLine) - topLine
+                    val hiK = (maxOf(a[0], a[1]) - topLine).coerceAtMost(visible)
+                    var lane = 0
+                    while (lane < maxLanes - 1 && laneUntil[lane] >= loK) lane++
+                    laneUntil[lane] = hiK
+                    intArrayOf(a[0], a[1], a[2], lane)
+                }
+            }
+            return arrowList
+        }
+
+        private fun paintBranchArrows(g: Graphics2D, visible: Int) {
+            val arrows = branchArrows(visible)
+            if (arrows.isEmpty()) return
+            for ((idx, a) in arrows.withIndex()) {
+                val srcK = a[0] - topLine; val tgtK = a[1] - topLine; val back = a[2] == 1
+                val hot = idx == hovered
+                g.color = if (hot) UiColors.accent()
+                    else if (back) UiColors.alpha(UiColors.accent(), 170) else UiColors.alpha(UiColors.info(), 150)
+                g.stroke = java.awt.BasicStroke(if (hot) 2.4f else 1f)
+                val laneX = laneXof(a[3])
+                val srcY = srcK * lineHeight + lineHeight / 2
+                val tgtY = tgtK * lineHeight + lineHeight / 2
+                g.drawLine(laneX, minOf(srcY, tgtY).coerceAtLeast(0), laneX, maxOf(srcY, tgtY).coerceAtMost(height))
+                if (srcK in 0 until visible) g.drawLine(width - 1, srcY, laneX, srcY)
+                if (tgtK in 0 until visible) {
+                    g.drawLine(laneX, tgtY, width - 1, tgtY)
+                    g.drawLine(width - 1, tgtY, width - 4, tgtY - 3)
+                    g.drawLine(width - 1, tgtY, width - 4, tgtY + 3)
+                } else {
+                    val edgeY = if (tgtY < 0) 0 else height
+                    val dy = if (tgtY < 0) 3 else -3
+                    g.drawLine(laneX, edgeY, laneX - 3, edgeY + dy)
+                    g.drawLine(laneX, edgeY, laneX + 3, edgeY + dy)
+                }
             }
         }
+    }
+
+    private fun branchTarget(raw: String): IntArray? {
+        val t = raw.trimStart()
+        if (t.length < 36 || t[8] != ':' || t[33] != ':') return null
+        val codeOff = t.substring(29, 33).toIntOrNull(16) ?: return null
+        val body = t.substring(35)
+        val mnem = body.takeWhile { it != ' ' }
+        val target = if (mnem.startsWith("goto") || mnem.startsWith("if-"))
+            (body.trimEnd().substringAfterLast(' ').toIntOrNull(16) ?: -1) else -1
+        return intArrayOf(codeOff, target)
     }
 
     private fun scrollBy(lines: Int) {
@@ -609,6 +750,9 @@ class VirtualCodeView(
         ViewAction("Copy Address") { copyAddress() },
         ViewAction("Copy Reference") { copyReference() },
         ViewAction("Select Method/Class") { selectEnclosing() },
+        ViewAction("Copy Method") { copyMethod() },
+        ViewAction("Next Method") { gotoMethod(true) },
+        ViewAction("Previous Method") { gotoMethod(false) },
         ViewAction("Find…") { openSearch() },
         ViewAction("Find Usages") { findUsages() },
         ViewAction("Go to Definition") { goToDefinition() },
@@ -723,14 +867,28 @@ class VirtualCodeView(
                 if (e.isPopupTrigger) { showMenu(e); return }
                 caret = posAt(e.x, e.y)
                 anchor = caret
-                highlight = if (e.clickCount == 2) wordAt(lineText(caret.line), caret.col) else null
+                highlight = wordAt(lineText(caret.line), caret.col)
                 surface.repaint()
                 reportCaret()
+                val onBranch = (branchTarget(rawLineText(caret.line))?.get(1) ?: -1) >= 0
+                if (onBranch || e.clickCount == 2 || (e.modifiersEx and Toolkit.getDefaultToolkit().menuShortcutKeyMaskEx) != 0) goToDefinition()
             }
 
             override fun mouseReleased(e: MouseEvent) {
                 autoScroll.stop()
                 if (e.isPopupTrigger) showMenu(e)
+            }
+
+            override fun mouseMoved(e: MouseEvent) {
+                val line = topLine + e.y / lineHeight
+                val h = if (line in 0 until source.lineCount) line else -1
+                if (h != hoverLine) { hoverLine = h; surface.repaint() }
+                val branch = h >= 0 && (branchTarget(rawLineText(h))?.get(1) ?: -1) >= 0
+                surface.cursor = java.awt.Cursor.getPredefinedCursor(if (branch) java.awt.Cursor.HAND_CURSOR else java.awt.Cursor.TEXT_CURSOR)
+            }
+
+            override fun mouseExited(e: MouseEvent) {
+                if (hoverLine != -1) { hoverLine = -1; surface.repaint() }
             }
 
             override fun mouseDragged(e: MouseEvent) {
@@ -763,6 +921,9 @@ class VirtualCodeView(
         bind(KeyEvent.VK_ENTER, 0, "gotoDef") { goToDefinition() }
         bind(KeyEvent.VK_TAB, 0, "decompile") { decompile() }
         bind(KeyEvent.VK_SPACE, 0, "toggleGraph") { toggleGraph() }
+        bind(KeyEvent.VK_DOWN, shortcut, "nextMethod") { gotoMethod(true) }
+        bind(KeyEvent.VK_UP, shortcut, "prevMethod") { gotoMethod(false) }
+        bind('C'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK, "copyMethod") { copyMethod() }
         bind(KeyEvent.VK_SLASH, 0, "comment") { addComment() }
         bind(KeyEvent.VK_N, 0, "rename") { renameSymbol() }
         bind('B'.code, shortcut, "bookmark") { toggleBookmark() }
@@ -803,11 +964,13 @@ class VirtualCodeView(
             add(menuItem("Copy Address", enabled = onInstruction) { copyAddress() })
             add(menuItem("Copy Reference", enabled = symbol != null) { copyReference() })
             add(menuItem("Select Method/Class", 'A'.code, shortcut) { selectEnclosing() })
+            add(menuItem("Copy Method", 'C'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK, enabled = currentMethod() != null) { copyMethod() })
             add(menuItem("Graph View", KeyEvent.VK_SPACE, 0, enabled = currentMethod() != null) { showGraph() })
             addSeparator()
             add(menuItem("Find…", 'F'.code, shortcut) { openSearch() })
             add(menuItem("Find Usages", KeyEvent.VK_X, 0, enabled = symbol != null) { findUsages() })
             add(menuItem("Go to Definition", KeyEvent.VK_ENTER, 0, enabled = symbol != null) { goToDefinition() })
+            add(menuItem("Go to Branch Target", enabled = (branchTarget(rawLineText(caret.line))?.get(1) ?: -1) >= 0) { gotoBranchTarget() })
             add(menuItem("Go to Address…", 'G'.code, shortcut) { goToAddress() })
             add(menuItem("Go to Main Activity") { goToMainActivity() })
             addSeparator()
@@ -845,7 +1008,7 @@ class VirtualCodeView(
             if ((source.lines(end, 1).firstOrNull() ?: "").trimStart().startsWith(".end method")) break
             end++
         }
-        return start to end.coerceAtMost(source.lineCount - 1)
+        return start to end.coerceAtMost((source.lineCount - 1).coerceAtLeast(0))
     }
 
     private fun classBounds(line: Int): Pair<Int, Int> {
@@ -870,6 +1033,23 @@ class VirtualCodeView(
 
     private fun decompile() {
         source.sectionAt(caret.line)?.let(onDecompile)
+    }
+
+    private fun gotoMethod(forward: Boolean) {
+        val step = if (forward) 1 else -1
+        var l = caret.line + step
+        while (l in 0 until source.lineCount) {
+            val t = rawLineText(l).trimStart()
+            if (t.startsWith(".method")) { goToLine(l); return }
+            if (t.startsWith("Class:") && !forward) return
+            l += step
+        }
+    }
+
+    private fun copyMethod() {
+        val (start, end) = enclosingMethod(caret.line) ?: return
+        val text = source.lines(start, end - start + 1).joinToString("\n") { it.replace("\t", "    ") }
+        Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(text), null)
     }
 
     private fun currentMethod(): Pair<String, String>? {
@@ -929,7 +1109,24 @@ class VirtualCodeView(
         revealOffset(input.trim().removePrefix("0x").toLongOrNull(16) ?: return)
     }
 
-    private fun goToDefinition() = symbolAtCaret()?.let { goToDefinition(it) }
+    private fun goToDefinition() {
+        if (gotoBranchTarget()) return
+        symbolAtCaret()?.let { goToDefinition(it) }
+    }
+
+    private fun gotoBranchTarget(): Boolean = gotoBranchFrom(caret.line)
+
+    private fun gotoBranchFrom(line: Int): Boolean {
+        val bd = branchTarget(rawLineText(line)) ?: return false
+        if (bd[1] < 0) return false
+        val (start, end) = enclosingMethod(line) ?: return false
+        val lines = source.lines(start, end - start + 1)
+        for (i in lines.indices) {
+            val b = branchTarget(lines[i]) ?: continue
+            if (b[0] == bd[1]) { goToLine(start + i); return true }
+        }
+        return false
+    }
 
     private fun goToDefinition(symbol: Symbol) {
         if (symbol.kind == SymbolKind.RESOURCE) {

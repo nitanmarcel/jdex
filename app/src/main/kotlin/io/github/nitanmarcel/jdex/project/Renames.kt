@@ -20,6 +20,7 @@ class Renames(var store: RenameStore = NoRenames) {
     private val fieldReverse = HashMap<String, String>()
     private val localRenames = HashMap<String, MutableMap<String, String>>()
     private val localReverse = HashMap<String, MutableMap<String, String>>()
+    private val registerPattern = HashMap<String, Regex>()
 
     init {
         reload()
@@ -29,7 +30,7 @@ class Renames(var store: RenameStore = NoRenames) {
         forward = store.renames()
         displayNames.clear()
         classDisplay.clear(); classReverse.clear(); methodReverse.clear(); fieldReverse.clear()
-        localRenames.clear(); localReverse.clear()
+        localRenames.clear(); localReverse.clear(); registerPattern.clear()
         displayNames.putAll(disambiguate(forward))
         for (key in forward.keys) {
             val name = displayNames[key] ?: continue
@@ -38,6 +39,7 @@ class Renames(var store: RenameStore = NoRenames) {
                 val register = key.substringAfterLast('#')
                 localRenames.getOrPut(methodKey) { HashMap() }[register] = name
                 localReverse.getOrPut(methodKey) { HashMap() }[name] = register
+                registerPattern.getOrPut(register) { Regex("\\b${Regex.escape(register)}\\b") }
                 continue
             }
             val member = if ("->" in key) key.substringAfter("->") else null
@@ -141,7 +143,7 @@ class Renames(var store: RenameStore = NoRenames) {
         val head = if (q >= 0) line.substring(0, q) else line
         var h = head
         for ((reg, name) in regs) {
-            if (reg in h) h = Regex("\\b${Regex.escape(reg)}\\b").replace(h) { name }
+            if (reg in h) h = (registerPattern[reg] ?: Regex("\\b${Regex.escape(reg)}\\b")).replace(h) { name }
         }
         return if (q >= 0) h + line.substring(q) else h
     }

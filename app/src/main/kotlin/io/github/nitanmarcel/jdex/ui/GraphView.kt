@@ -82,6 +82,7 @@ class GraphView(
 
     private class GLine(val insn: CfgInsn?, val text: String, val comment: String?)
     private class Node(val block: Int, val lines: List<GLine>, var rect: Rectangle2D.Double)
+    private class EdgePath(val edge: CfgEdge, val xs: DoubleArray, val ys: DoubleArray, val adx: Double, val ady: Double)
 
     private val nodes = ArrayList<Node>()
     private val nodeByBlock = HashMap<Int, Node>()
@@ -89,12 +90,16 @@ class GraphView(
     private val flat = ArrayList<Pair<Int, Int>>()
     private val effLine = HashMap<Int, Int>()
     private val edgeLane = HashMap<CfgEdge, Double>()
+    private val edgePaths = ArrayList<EdgePath>()
     private var contentW = 0.0
     private var contentH = 0.0
 
     private var selBlock = -1
     private var selInsn = -1
     private var selCol = 0
+    private var hoverBlock = -1
+    private var hoverInsn = -1
+    private var hoveredEdge = -1
 
     private var scale = 1.0
     private var tx = 0.0
@@ -191,6 +196,38 @@ class GraphView(
         }
         contentW = (if (lane > 0) right + margin + lane * 18.0 else right) + margin
         contentH = nodes.maxOf { it.rect.maxY } + margin
+        computeEdgePaths()
+    }
+
+    private fun computeEdgePaths() {
+        edgePaths.clear()
+        val direct = cfg.edges.filter { it.from != it.to && edgeLane[it] == null }
+        val outOf = direct.groupBy { it.from }.mapValues { (_, es) -> es.sortedBy { nodeByBlock[it.to]?.rect?.centerX ?: 0.0 } }
+        val intoOf = direct.groupBy { it.to }.mapValues { (_, es) -> es.sortedBy { nodeByBlock[it.from]?.rect?.centerX ?: 0.0 } }
+        fun spread(node: Node, list: List<CfgEdge>?, edge: CfgEdge): Double {
+            val n = list?.size ?: 1
+            if (n <= 1) return node.rect.centerX
+            val i = list!!.indexOf(edge)
+            val gap = minOf(24.0, (node.rect.width - 16) / n)
+            return node.rect.centerX + (i - (n - 1) / 2.0) * gap
+        }
+        for (edge in cfg.edges) {
+            val a = nodeByBlock[edge.from] ?: continue
+            val b = nodeByBlock[edge.to] ?: continue
+            val chX = edgeLane[edge]
+            if (chX != null) {
+                val x1 = a.rect.maxX; val y1 = a.rect.centerY; val x2 = b.rect.maxX; val y2 = b.rect.centerY
+                edgePaths.add(EdgePath(edge, doubleArrayOf(x1, chX, chX, x2), doubleArrayOf(y1, y1, y2, y2), -1.0, 0.0))
+            } else {
+                val outs = outOf[edge.from]
+                val x1 = spread(a, outs, edge); val y1 = a.rect.maxY
+                val x2 = spread(b, intoOf[edge.to], edge); val y2 = b.rect.y
+                val n = outs?.size ?: 1
+                val i = outs?.indexOf(edge) ?: 0
+                val midY = (y1 + y2) / 2 + (i - (n - 1) / 2.0) * 5
+                edgePaths.add(EdgePath(edge, doubleArrayOf(x1, x1, x2, x2), doubleArrayOf(y1, midY, midY, y2), 0.0, 1.0))
+            }
+        }
     }
 
     fun refresh() {
@@ -214,6 +251,16 @@ class GraphView(
         selCol = (((c.x - (node.rect.x + padX)) / cw).toInt()).coerceAtLeast(0)
         reportCaret()
         return true
+    }
+
+    private fun hoverAt(c: Point2D.Double) {
+        val node = nodeAt(c)
+        var b = -1; var i = -1
+        if (node != null) {
+            val li = ((c.y - (node.rect.y + padY)) / lineH).toInt()
+            if (li in 1 until node.lines.size) { b = node.block; i = li - 1 }
+        }
+        if (b != hoverBlock || i != hoverInsn) { hoverBlock = b; hoverInsn = i; repaint() }
     }
 
     private fun currentInsn(): CfgInsn? = nodeByBlock[selBlock]?.lines?.getOrNull(selInsn + 1)?.insn
@@ -300,9 +347,24 @@ class GraphView(
         return null
     }
 
-    private fun goToDefinition() = symbolAtSelection()?.let { sym ->
+    private fun goToDefinition() {
+        if (gotoBranchTarget()) return
+        val sym = symbolAtSelection() ?: return
         if (sym.kind == SymbolKind.RESOURCE) sym.resourceType?.let { t -> sym.resourceName?.let { n -> host.openResource(t, n) } }
         else host.goToDefinition(sym)
+    }
+
+    private fun gotoBranchTarget(): Boolean {
+        val insn = currentInsn() ?: return false
+        val mnem = insn.text.substringBefore(' ')
+        if (!mnem.startsWith("goto") && !mnem.startsWith("if-")) return false
+        val tgt = insn.text.trimEnd().substringAfterLast(' ').toIntOrNull(16) ?: return false
+        val block = cfg.blocks.firstOrNull { it.startOffset == tgt } ?: return false
+        selBlock = block.id; selInsn = 0; selCol = 0
+        ensureVisible(selBlock, selInsn)
+        reportCaret()
+        repaint()
+        return true
     }
 
     private fun findUsages() = symbolAtSelection()?.let { host.findUsages(it) }
@@ -336,8 +398,16 @@ class GraphView(
             override fun mousePressed(e: MouseEvent) {
                 last = e.point
                 requestFocusInWindow()
-                if (e.isPopupTrigger) { selectAt(toContent(e.point)); menu(e); return }
-                if (selectAt(toContent(e.point))) repaint()
+                val c = toContent(e.point)
+                if (e.isPopupTrigger) { selectAt(c); menu(e); return }
+                if (selectAt(c)) {
+                    repaint()
+                    val onBranch = currentInsn()?.text?.substringBefore(' ')?.let { it.startsWith("goto") || it.startsWith("if-") } == true
+                    if (onBranch || (e.modifiersEx and java.awt.Toolkit.getDefaultToolkit().menuShortcutKeyMaskEx) != 0) goToDefinition()
+                    return
+                }
+                val ei = edgeAt(c)
+                if (ei >= 0) followEdge(ei)
             }
             override fun mouseReleased(e: MouseEvent) { if (e.isPopupTrigger) menu(e) }
             override fun mouseClicked(e: MouseEvent) {
@@ -345,6 +415,18 @@ class GraphView(
             }
             override fun mouseDragged(e: MouseEvent) {
                 last?.let { tx += (e.x - it.x).toDouble(); ty += (e.y - it.y).toDouble(); last = e.point; repaint() }
+            }
+            override fun mouseMoved(e: MouseEvent) {
+                val c = toContent(e.point)
+                hoverAt(c)
+                val ei = edgeAt(c)
+                if (ei != hoveredEdge) { hoveredEdge = ei; repaint() }
+                val insn = nodeByBlock[hoverBlock]?.lines?.getOrNull(hoverInsn + 1)?.insn
+                val branch = insn?.text?.substringBefore(' ')?.let { it.startsWith("goto") || it.startsWith("if-") } == true
+                cursor = java.awt.Cursor.getPredefinedCursor(if (ei >= 0 || branch) java.awt.Cursor.HAND_CURSOR else java.awt.Cursor.DEFAULT_CURSOR)
+            }
+            override fun mouseExited(e: MouseEvent) {
+                if (hoverBlock != -1 || hoveredEdge != -1) { hoverBlock = -1; hoverInsn = -1; hoveredEdge = -1; repaint() }
             }
         }
         addMouseListener(mouse)
@@ -384,6 +466,7 @@ class GraphView(
             addSeparator()
             add(item("Find Usages", sym != null) { findUsages() })
             add(item("Go to Definition", sym != null) { goToDefinition() })
+            add(item("Go to Branch Target", currentInsn()?.text?.substringBefore(' ')?.let { it.startsWith("goto") || it.startsWith("if-") } == true) { gotoBranchTarget() })
             add(item("Rename…", sym?.renameKey != null && renames.active) { renameSymbol() })
             add(item("Add / Edit Comment", onInsn) { addComment() })
             addSeparator()
@@ -429,27 +512,44 @@ class GraphView(
     }
 
     private fun paintEdges(g2: Graphics2D) {
-        for (edge in cfg.edges) {
-            val a = nodeByBlock[edge.from] ?: continue
-            val b = nodeByBlock[edge.to] ?: continue
-            g2.color = edgeColor(edge.kind)
-            g2.stroke = if (edge.kind == CfgEdgeKind.EXCEPTION)
-                BasicStroke(1.6f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND, 1f, floatArrayOf(4f, 4f), 0f)
-            else BasicStroke(1.6f, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND)
-            val chX = edgeLane[edge]
-            if (chX != null) {
-                val x1 = a.rect.maxX; val y1 = a.rect.centerY
-                val x2 = b.rect.maxX; val y2 = b.rect.centerY
-                polyline(g2, doubleArrayOf(x1, chX, chX, x2), doubleArrayOf(y1, y1, y2, y2))
-                arrow(g2, x2, y2, -1.0, 0.0)
-            } else {
-                val x1 = a.rect.centerX; val y1 = a.rect.maxY
-                val x2 = b.rect.centerX; val y2 = b.rect.y
-                val midY = (y1 + y2) / 2
-                polyline(g2, doubleArrayOf(x1, x1, x2, x2), doubleArrayOf(y1, midY, midY, y2))
-                arrow(g2, x2, y2, 0.0, 1.0)
-            }
+        for ((idx, p) in edgePaths.withIndex()) {
+            val hot = idx == hoveredEdge
+            g2.color = edgeColor(p.edge.kind)
+            val w = if (hot) 3.0f else 1.6f
+            g2.stroke = if (p.edge.kind == CfgEdgeKind.EXCEPTION)
+                BasicStroke(w, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND, 1f, floatArrayOf(4f, 4f), 0f)
+            else BasicStroke(w, BasicStroke.CAP_BUTT, BasicStroke.JOIN_ROUND)
+            polyline(g2, p.xs, p.ys)
+            arrow(g2, p.xs.last(), p.ys.last(), p.adx, p.ady)
         }
+    }
+
+    private fun edgeAt(c: Point2D.Double): Int {
+        val tol = 6.0 / scale
+        var best = -1; var bestD = tol
+        for ((idx, p) in edgePaths.withIndex()) {
+            var d = Double.MAX_VALUE
+            for (i in 0 until p.xs.size - 1) d = minOf(d, distToSeg(c.x, c.y, p.xs[i], p.ys[i], p.xs[i + 1], p.ys[i + 1]))
+            if (d < bestD) { bestD = d; best = idx }
+        }
+        return best
+    }
+
+    private fun distToSeg(px: Double, py: Double, x1: Double, y1: Double, x2: Double, y2: Double): Double {
+        val dx = x2 - x1; val dy = y2 - y1
+        val len2 = dx * dx + dy * dy
+        if (len2 == 0.0) return Math.hypot(px - x1, py - y1)
+        val t = (((px - x1) * dx + (py - y1) * dy) / len2).coerceIn(0.0, 1.0)
+        return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+    }
+
+    private fun followEdge(idx: Int) {
+        val tgt = edgePaths[idx].edge.to
+        if (nodeByBlock[tgt] == null) return
+        selBlock = tgt; selInsn = 0; selCol = 0
+        ensureVisible(selBlock, selInsn)
+        reportCaret()
+        repaint()
     }
 
     private fun polyline(g2: Graphics2D, xs: DoubleArray, ys: DoubleArray) {
@@ -478,6 +578,7 @@ class GraphView(
         val commentFg = blend(bg, UiColors.success(), 0.85)
         val selBg = UiColors.alpha(UiColors.accent(), 64)
         val syncBg = UiColors.alpha(UiColors.accent(), 40)
+        val hoverBg = blend(bg, fg, 0.16)
         g2.font = font
         for (n in nodes) {
             val r = n.rect
@@ -486,6 +587,7 @@ class GraphView(
             val x = (r.x + padX)
             n.lines.forEachIndexed { i, line ->
                 val top = (r.y + padY + i * lineH)
+                if (n.block == hoverBlock && i == hoverInsn + 1) { g2.color = hoverBg; g2.fillRect((r.x + 1).toInt(), top.toInt(), (r.width - 2).toInt(), lineH) }
                 if (n.block == syncBlock && i == syncInsn + 1) { g2.color = syncBg; g2.fillRect((r.x + 1).toInt(), top.toInt(), (r.width - 2).toInt(), lineH) }
                 if (n.block == selBlock && i == selInsn + 1) { g2.color = selBg; g2.fillRect((r.x + 1).toInt(), top.toInt(), (r.width - 2).toInt(), lineH) }
                 val baseline = (top + fm.ascent).toFloat()
@@ -493,7 +595,7 @@ class GraphView(
                     g2.color = headerFg
                     g2.drawString(line.text, x.toFloat(), baseline)
                 } else {
-                    paintTokens(g2, line.text, x.toFloat(), baseline, scheme, fg)
+                    paintTokens(g2, line.text, x.toFloat(), baseline, scheme, fg, bg)
                     line.comment?.let {
                         g2.color = commentFg
                         g2.drawString("    ; $it", (x + line.text.length * cw).toFloat(), baseline)
@@ -503,14 +605,14 @@ class GraphView(
         }
     }
 
-    private fun paintTokens(g2: Graphics2D, text: String, x: Float, baseline: Float, scheme: SyntaxScheme, fallback: Color) {
+    private fun paintTokens(g2: Graphics2D, text: String, x: Float, baseline: Float, scheme: SyntaxScheme, fallback: Color, bg: Color) {
         if (text.isEmpty()) return
         val segment = Segment(text.toCharArray(), 0, text.length)
         var token = tokenMaker.getTokenList(segment, TokenTypes.NULL, 0)
         var col = 0
         while (token != null && token.isPaintable()) {
             val lexeme = token.lexeme
-            g2.color = scheme.getStyle(token.type)?.foreground ?: fallback
+            g2.color = io.github.nitanmarcel.jdex.syntax.BytecodeStyle.color(token.type, scheme, fallback, bg)
             g2.drawString(lexeme, x + col * cw, baseline)
             col += lexeme.length
             token = token.nextToken

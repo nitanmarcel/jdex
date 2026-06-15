@@ -7,6 +7,12 @@ import jadx.api.plugins.input.data.ICodeReader
 import jadx.api.plugins.input.data.IFieldData
 import jadx.api.plugins.input.data.IMethodData
 import jadx.api.plugins.input.data.ISeqConsumer
+import jadx.api.plugins.input.data.annotations.EncodedValue
+import jadx.api.plugins.input.data.annotations.IAnnotation
+import jadx.api.plugins.input.data.attributes.IJadxAttribute
+import jadx.api.plugins.input.data.attributes.types.AnnotationsAttr
+import jadx.api.plugins.input.data.attributes.types.ExceptionsAttr
+import jadx.api.plugins.input.data.attributes.types.MethodParametersAttr
 import jadx.api.plugins.input.insns.InsnData
 import jadx.api.plugins.input.insns.InsnIndexType
 import jadx.api.plugins.input.insns.custom.IArrayPayload
@@ -26,12 +32,13 @@ object BytecodeWriter {
         if (data.interfacesTypes.isNotEmpty()) {
             out.appendLine("Interfaces: [${data.interfacesTypes.joinToString(", ")}]")
         }
+        userAnnotations(data.attributes).forEach { out.appendLine(formatAnnotation(it)) }
 
-        val fields = mutableListOf<Pair<String, String>>()
+        val fields = mutableListOf<FieldRow>()
         val methods = StringBuilder()
         data.visitFieldsAndMethods(
             ISeqConsumer<IFieldData> { field ->
-                fields.add("${modifiers(field.accessFlags, AccessFlagsScope.FIELD)}${field.name}" to field.type)
+                fields.add(FieldRow(userAnnotations(field.attributes), "${modifiers(field.accessFlags, AccessFlagsScope.FIELD)}${field.name}", field.type))
             },
             ISeqConsumer<IMethodData> { method -> appendMethod(methods, method, resources) },
         )
@@ -39,25 +46,29 @@ object BytecodeWriter {
         if (fields.isNotEmpty()) {
             out.appendLine()
             out.appendLine("# fields")
-            val width = fields.maxOf { it.first.length }
-            fields.forEach { (declaration, type) -> out.appendLine(".field ${declaration.padEnd(width)} : $type") }
+            val width = fields.maxOf { it.declaration.length }
+            fields.forEach { f ->
+                f.annotations.forEach { out.appendLine(formatAnnotation(it)) }
+                out.appendLine(".field ${f.declaration.padEnd(width)} : ${f.type}")
+            }
         }
         out.append(methods)
         return out.toString()
     }
 
+    private class FieldRow(val annotations: List<IAnnotation>, val declaration: String, val type: String)
+
     private fun appendMethod(out: StringBuilder, method: IMethodData, resources: Map<Int, String>) {
         val ref = method.methodRef.apply { load() }
         out.appendLine()
+        userAnnotations(method.attributes).forEach { out.appendLine(formatAnnotation(it)) }
         out.appendLine(".method ${modifiers(method.accessFlags, AccessFlagsScope.METHOD)}${ref.name}(${ref.argTypes.joinToString("")})${ref.returnType}")
         val reader = method.codeReader
         if (reader == null) {
+            throwsOf(method.attributes).forEach { out.appendLine("    .throws $it") }
             out.appendLine(".end method")
             return
         }
-
-        out.appendLine("    .registers ${reader.registersCount}")
-        appendTries(out, reader)
 
         val isStatic = AccessFlags.hasFlag(method.accessFlags, AccessFlags.STATIC)
         val insSize = (if (isStatic) 0 else 1) + ref.argTypes.sumOf { if (it == "J" || it == "D") 2 else 1 }
@@ -65,8 +76,20 @@ object BytecodeWriter {
 
         val debug = reader.debugInfo
         val lines = debug?.sourceLineMapping ?: emptyMap()
-        val localStart = (debug?.localVars ?: emptyList()).groupBy { it.startOffset }
-        val localEnd = (debug?.localVars ?: emptyList()).groupBy { it.endOffset }
+        val localVars = debug?.localVars ?: emptyList()
+        val localStart = localVars.groupBy { it.startOffset }
+        val localEnd = localVars.groupBy { it.endOffset }
+
+        out.appendLine("    .registers ${reader.registersCount}")
+        throwsOf(method.attributes).forEach { out.appendLine("    .throws $it") }
+        if (localVars.none { it.isMarkedAsParameter }) {
+            var reg = paramBase + (if (isStatic) 0 else 1)
+            paramNames(method.attributes).forEachIndexed { i, name ->
+                if (name != null) out.appendLine("    .param ${reg(reg, paramBase)}, \"$name\"")
+                reg += if (ref.argTypes.getOrNull(i).let { it == "J" || it == "D" }) 2 else 1
+            }
+        }
+        appendTries(out, reader)
 
         out.appendLine()
         val codeBase = reader.codeOffset
@@ -83,10 +106,56 @@ object BytecodeWriter {
                 val kind = if (it.isMarkedAsParameter) ".param" else ".local"
                 out.appendLine("    $kind ${reg(it.regNum, paramBase)}, \"${it.name}\":${it.type}")
             }
-            out.appendLine("    ${formatInsn(insn, codeBase, resources, paramBase)}")
+            if (insn.rawOpcodeUnit == 0x0100 || insn.rawOpcodeUnit == 0x0200 || insn.rawOpcodeUnit == 0x0300) {
+                appendPayload(out, insn, codeBase)
+            } else {
+                out.appendLine("    ${formatInsn(insn, codeBase, resources, paramBase)}")
+            }
             first = false
         }
         out.appendLine(".end method")
+    }
+
+    private fun appendPayload(out: StringBuilder, insn: InsnData, codeBase: Int) {
+        val fileOffset = codeBase + insn.offset * 2
+        val name = when (insn.rawOpcodeUnit) {
+            0x0100 -> "packed-switch-payload"
+            0x0200 -> "sparse-switch-payload"
+            else -> "fill-array-data-payload"
+        }
+        out.appendLine("    %08x: %-18s %04x: %s".format(fileOffset, "%04x".format(insn.rawOpcodeUnit), insn.offset, name))
+        when (insn.rawOpcodeUnit) {
+            0x0100, 0x0200 -> (insn.payload as? ISwitchPayload)?.let { sw ->
+                val keys = sw.keys; val targets = sw.targets
+                for (k in keys.indices) out.appendLine("            0x%x -> %04x".format(keys[k], targets.getOrElse(k) { 0 }))
+            }
+            0x0300 -> (insn.payload as? IArrayPayload)?.let { arr ->
+                arrayValueList(arr.data).chunked(8).forEach { out.appendLine("            ${it.joinToString(", ")}") }
+            }
+        }
+    }
+
+    private fun userAnnotations(attrs: List<IJadxAttribute>): List<IAnnotation> =
+        (attrs.filterIsInstance<AnnotationsAttr>().firstOrNull()?.list ?: emptyList())
+            .filterNot { it.annotationClass.startsWith("Ldalvik/annotation/") }
+
+    private fun throwsOf(attrs: List<IJadxAttribute>): List<String> =
+        attrs.filterIsInstance<ExceptionsAttr>().firstOrNull()?.list ?: emptyList()
+
+    private fun paramNames(attrs: List<IJadxAttribute>): List<String?> =
+        attrs.filterIsInstance<MethodParametersAttr>().firstOrNull()?.list?.map { it.name } ?: emptyList()
+
+    private fun formatAnnotation(a: IAnnotation): String {
+        val values = a.values.entries.joinToString(", ") { (k, v) -> "$k = ${encodedValue(v)}" }
+        return if (values.isEmpty()) "@${a.annotationClass}" else "@${a.annotationClass}($values)"
+    }
+
+    private fun encodedValue(v: EncodedValue): String = when (val value = v.value) {
+        null -> "null"
+        is EncodedValue -> encodedValue(value)
+        is String -> "\"${escape(value)}\""
+        is List<*> -> "{" + value.joinToString(", ") { (it as? EncodedValue)?.let(::encodedValue) ?: it.toString() } + "}"
+        else -> value.toString()
     }
 
     private fun appendTries(out: StringBuilder, reader: ICodeReader) {
@@ -147,10 +216,12 @@ object BytecodeWriter {
         else -> null
     }
 
-    private fun arrayValues(data: Any?): String {
-        if (data == null) return ""
+    private fun arrayValues(data: Any?): String = arrayValueList(data).joinToString(", ")
+
+    private fun arrayValueList(data: Any?): List<String> {
+        if (data == null) return emptyList()
         val size = ReflectArray.getLength(data)
-        return (0 until size).joinToString(", ") {
+        return (0 until size).map {
             when (val v = ReflectArray.get(data, it)) {
                 is Byte -> "0x${(v.toInt() and 0xff).toString(16)}"
                 is Short -> "0x${(v.toInt() and 0xffff).toString(16)}"
