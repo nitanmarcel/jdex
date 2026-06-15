@@ -81,12 +81,13 @@ class ScriptPanel(private val api: ScriptApi) : JPanel(BorderLayout()), Dockable
 
     init {
         Docking.registerDockable(this)
+        SyntaxThemes.attach(console)
 
         val toolbar = JToolBar().apply {
             isFloatable = false
-            add(JButton("Reset").apply { addActionListener { reset() } })
-            add(JButton("Clear").apply { addActionListener { clear() } })
-            add(JButton("Stub…").apply { addActionListener { exportStub() } })
+            add(JButton("Reset", Icons.RESET).apply { addActionListener { reset() } })
+            add(JButton("Clear", Icons.CLEAR).apply { addActionListener { clear() } })
+            add(JButton("Stub…", Icons.SAVE).apply { addActionListener { exportStub() } })
         }
 
         bind(KeyEvent.VK_ENTER, "submit") { submit() }
@@ -231,7 +232,7 @@ class ScriptPanel(private val api: ScriptApi) : JPanel(BorderLayout()), Dockable
         docArea.text = ""
         val content = JPanel(BorderLayout()).apply {
             add(JScrollPane(candidateList), BorderLayout.CENTER)
-            add(JScrollPane(docArea).apply { border = BorderFactory.createMatteBorder(1, 0, 0, 0, Color.GRAY) }, BorderLayout.SOUTH)
+            add(JScrollPane(docArea).apply { border = BorderFactory.createMatteBorder(1, 0, 0, 0, UiColors.border()) }, BorderLayout.SOUTH)
         }
         popup = PopupFactory.getSharedInstance().getPopup(console, content, x, y).also { it.show() }
         refreshDoc()
@@ -291,7 +292,7 @@ class ScriptPanel(private val api: ScriptApi) : JPanel(BorderLayout()), Dockable
             font = mono
             isOpaque = true
             border = BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(Color.GRAY),
+                BorderFactory.createLineBorder(UiColors.border()),
                 BorderFactory.createEmptyBorder(2, 6, 2, 6),
             )
         }

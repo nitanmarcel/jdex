@@ -39,6 +39,9 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.logging.Level
 import java.util.logging.Logger
+import java.awt.Color
+import javax.swing.ButtonGroup
+import javax.swing.JColorChooser
 import javax.swing.JFileChooser
 import javax.swing.JOptionPane
 import javax.swing.SwingUtilities
@@ -46,6 +49,7 @@ import javax.swing.JFrame
 import javax.swing.JMenu
 import javax.swing.JMenuBar
 import javax.swing.JMenuItem
+import javax.swing.JRadioButtonMenuItem
 import javax.swing.KeyStroke
 import javax.swing.filechooser.FileNameExtensionFilter
 
@@ -160,14 +164,16 @@ class MainWindow : JFrame("jdex") {
     private fun createMenuBar(editors: EditorAnchor, explorer: FilesPanel, hierarchy: HierarchyPanel, logger: LoggerPanel, scripting: ScriptPanel) = JMenuBar().apply {
         add(JMenu("File").apply {
             add(JMenuItem("Open…").apply {
+                icon = Icons.FOLDER_OPEN
                 accelerator = shortcut(KeyEvent.VK_O)
                 addActionListener { openWithChooser() }
             })
-            add(JMenuItem("Import DEX…").apply { addActionListener { importDex() } })
-            add(JMenuItem("Run Script…").apply { addActionListener { runScript() } })
+            add(JMenuItem("Import DEX…").apply { icon = Icons.FILE_BINARY; addActionListener { importDex() } })
+            add(JMenuItem("Run Script…").apply { icon = Icons.RUN; addActionListener { runScript() } })
             add(recentMenu)
             addSeparator()
             add(saveItem.apply {
+                icon = Icons.SAVE
                 accelerator = shortcut(KeyEvent.VK_S)
                 isEnabled = false
                 addActionListener { project?.save() }
@@ -200,6 +206,36 @@ class MainWindow : JFrame("jdex") {
                 else Docking.dock(scripting, this@MainWindow, DockingRegion.SOUTH, 0.25)
             })
         })
+        add(JMenu("Appearance").apply {
+            add(JMenu("Theme").apply {
+                val group = ButtonGroup()
+                Themes.all.forEach { def ->
+                    add(JRadioButtonMenuItem(def.label, def.id == Themes.currentId).also {
+                        group.add(it)
+                        it.addActionListener { Themes.select(def.id) }
+                    })
+                }
+            })
+            addSeparator()
+            add(JMenuItem("Theme Editor…").apply { icon = Icons.SETTINGS; addActionListener { ThemeEditor.open(this@MainWindow) } })
+        })
+        add(JMenu("Help").apply {
+            add(JMenuItem("About jdex…").apply { addActionListener { showAbout() } })
+        })
+    }
+
+    private fun showAbout() {
+        val msg = """
+            <html><body style='width:360px'>
+            <h2 style='margin:0'>jdex</h2>
+            <p>Android APK/DEX reverse-engineering tool.</p>
+            <p>Built with jadx, FlatLaf, GraalPy, RSyntaxTextArea and Modern Docking.</p>
+            <p>Icons: <b>VS Code Codicons</b> &copy; Microsoft Corporation, licensed under
+            CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).</p>
+            <p style='color:gray'>Java ${System.getProperty("java.version")}</p>
+            </body></html>
+        """.trimIndent()
+        JOptionPane.showMessageDialog(this, msg, "About jdex", JOptionPane.INFORMATION_MESSAGE)
     }
 
     private fun viewItem(text: String, dockable: Dockable, dock: () -> Unit) =

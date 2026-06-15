@@ -32,7 +32,7 @@ class JavaView(
 
     private val area = CodeTextArea(code, Syntax.JAVA)
     private val findBar = FindBar()
-    private val syncColor = Color(0xFFF2A8)
+    private val syncColor get() = UiColors.alpha(UiColors.accent(), 80)
     private var highlightTag: Any? = null
     private val syncCheck = FlatTriStateCheckBox("Sync caret", syncInitial).apply {
         toolTipText = "Off  ·  checked = exact sync  ·  filled = also snap to nearest line"

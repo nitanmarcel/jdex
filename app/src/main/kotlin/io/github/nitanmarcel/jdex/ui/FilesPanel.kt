@@ -29,7 +29,7 @@ class FilesPanel(
 
     private val root = DefaultMutableTreeNode()
     private val model = DefaultTreeModel(root)
-    private val tree = JTree(model).apply { isRootVisible = false }
+    private val tree = JTree(model).apply { isRootVisible = false; cellRenderer = NodeRenderer() }
 
     init {
         Docking.registerDockable(this)
@@ -155,9 +155,33 @@ class FilesPanel(
             node.children.forEach { add(toTreeNode(it)) }
         }
 
+    private inner class NodeRenderer : javax.swing.tree.DefaultTreeCellRenderer() {
+        override fun getTreeCellRendererComponent(
+            tree: JTree, value: Any?, sel: Boolean, expanded: Boolean, leaf: Boolean, row: Int, focus: Boolean,
+        ): java.awt.Component {
+            super.getTreeCellRendererComponent(tree, value, sel, expanded, leaf, row, focus)
+            ((value as? DefaultMutableTreeNode)?.userObject as? ProjectNode)?.let { icon = iconFor(it, expanded) }
+            return this
+        }
+    }
+
+    private fun iconFor(node: ProjectNode, expanded: Boolean): javax.swing.Icon = when {
+        node.dex != null -> Icons.FILE_BINARY
+        node.open == null -> if (expanded) Icons.FOLDER_OPEN else Icons.FOLDER
+        node.label == "Bytecode" || node.label == "Manifest" -> Icons.FILE_CODE
+        node.label.startsWith("Certificate") -> Icons.of("shield")
+        node.label.endsWith(".json") -> Icons.JSON
+        node.label.substringAfterLast('.', "").lowercase() in CODE_EXT -> Icons.FILE_CODE
+        else -> Icons.FILE
+    }
+
     override fun isWrappableInScrollpane() = false
 
     override fun getPersistentID() = "project_explorer"
 
     override fun getTabText() = "Project Explorer"
+
+    private companion object {
+        val CODE_EXT = setOf("xml", "html", "htm", "js", "css", "smali", "java", "kt", "properties", "json", "txt")
+    }
 }

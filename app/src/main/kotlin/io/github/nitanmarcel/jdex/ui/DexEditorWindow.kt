@@ -55,7 +55,7 @@ class DexEditorWindow(
     private fun autoFix() {
         runCatching { Dex.repair(currentBytes()) }
             .onSuccess { codeArea.setContentData(ByteArrayEditableData(it)); updateStatus() }
-            .onFailure { status.text = "Cannot auto-fix: ${it.message}"; status.foreground = Color(0xC0392B) }
+            .onFailure { status.text = "Cannot auto-fix: ${it.message}"; status.foreground = UiColors.error() }
     }
 
     private fun save() {
@@ -67,10 +67,10 @@ class DexEditorWindow(
         val problems = Dex.validate(currentBytes())
         if (problems.isEmpty()) {
             status.text = "✓ Valid DEX"
-            status.foreground = Color(0x2E, 0x86, 0x3C)
+            status.foreground = UiColors.success()
         } else {
             status.text = "✗ ${problems.joinToString(", ")}"
-            status.foreground = Color(0xC0, 0x39, 0x2B)
+            status.foreground = UiColors.error()
         }
     }
 }

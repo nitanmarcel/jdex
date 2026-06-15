@@ -21,6 +21,7 @@ binary-data = { module = "org.exbin.auxiliary:binary_data", version.ref = "binar
 binary-data-array = { module = "org.exbin.auxiliary:binary_data-array", version.ref = "binarydata" }
 flatlaf = { module = "com.formdev:flatlaf", version.ref = "flatlaf" }
 flatlaf-extras = { module = "com.formdev:flatlaf-extras", version.ref = "flatlaf" }
+flatlaf-intellij-themes = { module = "com.formdev:flatlaf-intellij-themes", version.ref = "flatlaf" }
 graalpy-polyglot = { module = "org.graalvm.polyglot:polyglot", version.ref = "graalpy" }
 graalpy-language = { module = "org.graalvm.python:python-language", version.ref = "graalpy" }
 graalpy-resources = { module = "org.graalvm.python:python-resources", version.ref = "graalpy" }

@@ -18,6 +18,7 @@ dependencies {
     implementation(libs.binary.data.array)
     implementation(libs.flatlaf)
     implementation(libs.flatlaf.extras)
+    implementation(libs.flatlaf.intellij.themes)
     implementation(libs.graalpy.polyglot)
     implementation(libs.graalpy.language)
     implementation(libs.graalpy.resources)

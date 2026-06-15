@@ -192,14 +192,24 @@ class HierarchyPanel(
         ): Component {
             super.getTreeCellRendererComponent(tree, value, sel, expanded, leaf, row, hasFocus)
             when (val obj = (value as? DefaultMutableTreeNode)?.userObject) {
-                is HClass -> renames.nameFor(classKey(obj.rawName))?.let { text = it }
-                is HMethod -> renames.nameFor("${classKey(obj.declaringRawName)}->${obj.shortId}")?.let {
-                    val rest = obj.display.indexOf('(')
-                    text = if (rest >= 0) it + obj.display.substring(rest) else it
+                is PackageLabel -> icon = Icons.PACKAGE
+                is HClass -> {
+                    icon = Icons.CLASS
+                    renames.nameFor(classKey(obj.rawName))?.let { text = it }
                 }
-                is HField -> renames.nameFor("${classKey(obj.declaringRawName)}->${obj.name}")?.let {
-                    val rest = obj.display.indexOf(' ')
-                    text = if (rest >= 0) it + obj.display.substring(rest) else it
+                is HMethod -> {
+                    icon = Icons.METHOD
+                    renames.nameFor("${classKey(obj.declaringRawName)}->${obj.shortId}")?.let {
+                        val rest = obj.display.indexOf('(')
+                        text = if (rest >= 0) it + obj.display.substring(rest) else it
+                    }
+                }
+                is HField -> {
+                    icon = Icons.FIELD
+                    renames.nameFor("${classKey(obj.declaringRawName)}->${obj.name}")?.let {
+                        val rest = obj.display.indexOf(' ')
+                        text = if (rest >= 0) it + obj.display.substring(rest) else it
+                    }
                 }
             }
             return this

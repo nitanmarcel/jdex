@@ -12,7 +12,7 @@ class EditorAnchor : JPanel(BorderLayout()), Dockable {
     init {
         Docking.registerDockingAnchor(this)
 
-        add(RTextScrollPane(RSyntaxTextArea()), BorderLayout.CENTER)
+        add(RTextScrollPane(RSyntaxTextArea().also { SyntaxThemes.attach(it) }), BorderLayout.CENTER)
     }
 
     override fun isWrappableInScrollpane() = false

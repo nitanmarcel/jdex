@@ -72,23 +72,23 @@ class VirtualCodeView(
     private val backStack = ArrayDeque<Int>()
     private val forwardStack = ArrayDeque<Int>()
 
-    private val codeFont = Font(Font.MONOSPACED, Font.PLAIN, 13)
+    private val codeFont = SyntaxThemes.editorFont()
     private val metrics = getFontMetrics(codeFont)
     private val lineHeight = metrics.height
     private val charWidth = metrics.charWidth('m')
     private val ascent = metrics.ascent
 
     private val tokenMaker = TokenMakerFactory.getDefaultInstance().getTokenMaker(SyntaxStyles.mime(syntax))
-    private val scheme: SyntaxScheme
-    private val background: Color
-    private val foreground: Color
-    private val selectionColor: Color
-    private val gutterColor: Color
-    private val currentLineColor: Color
-    private val commentColor: Color
-    private val highlightColor: Color
-    private val bookmarkColor: Color
-    private val syncColor = Color(0xFF, 0xD5, 0x4F, 60)
+    private var scheme: SyntaxScheme = SyntaxScheme(true)
+    private var background: Color = Color.WHITE
+    private var foreground: Color = Color.BLACK
+    private var selectionColor: Color = Color(0xAD, 0xD6, 0xFF)
+    private var gutterColor: Color = Color.GRAY
+    private var currentLineColor: Color = Color(0, 0, 0, 20)
+    private var commentColor: Color = Color(0x00, 0x80, 0x00)
+    private var highlightColor: Color = Color(0xFF, 0xD5, 0x4F, 110)
+    private var bookmarkColor: Color = Color(0x2E, 0x86, 0xDE)
+    private var syncColor = Color(0xFF, 0xD5, 0x4F, 60)
     private var syncHighlightLine: Int? = null
     var syncApprox = false
 
@@ -104,17 +104,36 @@ class VirtualCodeView(
     private val hBar = JScrollBar(JScrollBar.HORIZONTAL)
     private var searchDialog: SearchDialog? = null
 
-    init {
-        val theme = runCatching { Theme.load(javaClass.getResourceAsStream("/org/fife/ui/rsyntaxtextarea/themes/default.xml")) }.getOrNull()
-        scheme = theme?.scheme ?: SyntaxScheme(true)
-        background = theme?.bgColor ?: Color.WHITE
-        foreground = scheme.getStyle(TokenTypes.IDENTIFIER)?.foreground ?: Color.BLACK
-        selectionColor = theme?.selectionBG ?: Color(0xAD, 0xD6, 0xFF)
+    private val rethemeable = object : SyntaxThemes.Rethemeable {
+        override fun retheme() {
+            applyTheme()
+            surface.repaint()
+            gutter.repaint()
+        }
+    }
+
+    private fun applyTheme() {
+        val t = SyntaxThemes.theme()
+        scheme = t.scheme
+        background = t.bgColor ?: Color.WHITE
+        foreground = SyntaxThemes.foregroundOf(t)
+        selectionColor = t.selectionBG ?: Color(0xAD, 0xD6, 0xFF)
         gutterColor = Color(foreground.red, foreground.green, foreground.blue, 128)
         currentLineColor = Color(foreground.red, foreground.green, foreground.blue, 20)
         commentColor = scheme.getStyle(TokenTypes.COMMENT_EOL)?.foreground ?: Color(0x00, 0x80, 0x00)
-        highlightColor = Color(0xFF, 0xD5, 0x4F, 110)
-        bookmarkColor = Color(0x2E, 0x86, 0xDE)
+        val accent = UiColors.accent()
+        highlightColor = UiColors.alpha(accent, 96)
+        syncColor = UiColors.alpha(accent, 56)
+        bookmarkColor = UiColors.info()
+        surface.background = background
+        surface.foreground = foreground
+        gutter.background = background
+        gutter.foreground = foreground
+    }
+
+    init {
+        applyTheme()
+        SyntaxThemes.register(rethemeable)
         commentCache.putAll(comments.all())
         bookmarkLines.addAll(bookmarks.bookmarks())
 

@@ -16,6 +16,7 @@ class CodeTextArea(text: String, syntax: Syntax) : RSyntaxTextArea() {
         syntaxEditingStyle = SyntaxStyles.mime(syntax)
         setText(text)
         caretPosition = 0
+        SyntaxThemes.attach(this)
     }
 
     companion object {
