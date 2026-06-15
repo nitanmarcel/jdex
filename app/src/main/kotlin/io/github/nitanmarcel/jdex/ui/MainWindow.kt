@@ -59,6 +59,8 @@ class MainWindow : JFrame("jdex") {
     private val recentFiles = RecentFiles()
     private val recentMenu = JMenu("Open Recent")
     private val saveItem = JMenuItem("Save")
+    private val saveAsItem = JMenuItem("Save As…")
+    private var projectName: String? = null
     private val scope = CoroutineScope(Dispatchers.Swing)
     private val openTabs = LinkedHashMap<String, EditorTab>()
     private lateinit var explorer: FilesPanel
@@ -75,18 +77,20 @@ class MainWindow : JFrame("jdex") {
     private lateinit var scripting: ScriptPanel
 
     init {
-        defaultCloseOperation = EXIT_ON_CLOSE
+        defaultCloseOperation = DO_NOTHING_ON_CLOSE
         size = Dimension(1000, 700)
         setLocationRelativeTo(null)
 
         addWindowListener(object : WindowAdapter() {
             override fun windowClosing(e: WindowEvent) {
+                if (!confirmDiscardChanges()) return
                 runCatching { clearEditors() }
                 runCatching { AppState.persist() }
                 runCatching { scope.cancel() }
                 runCatching { scripting.close() }
                 runCatching { session?.close() }
                 runCatching { project?.close() }
+                kotlin.system.exitProcess(0)
             }
         })
 
@@ -176,7 +180,12 @@ class MainWindow : JFrame("jdex") {
                 icon = Icons.SAVE
                 accelerator = shortcut(KeyEvent.VK_S)
                 isEnabled = false
-                addActionListener { project?.save() }
+                addActionListener { saveProject() }
+            })
+            add(saveAsItem.apply {
+                accelerator = KeyStroke.getKeyStroke(KeyEvent.VK_S, Toolkit.getDefaultToolkit().menuShortcutKeyMaskEx or KeyEvent.SHIFT_DOWN_MASK)
+                isEnabled = false
+                addActionListener { saveProjectAs() }
             })
             addSeparator()
             add(JMenuItem("Close").apply {
@@ -259,21 +268,98 @@ class MainWindow : JFrame("jdex") {
     }
 
     private fun open(file: File) {
+        if (!confirmDiscardChanges()) return
+        val isProject = file.extension == Project.EXTENSION
+        val sibling = if (!isProject) file.resolveSibling("${file.nameWithoutExtension}.${Project.EXTENSION}") else null
+        var startFresh = false
+        if (sibling != null && sibling.isFile) {
+            val choice = JOptionPane.showOptionDialog(
+                this,
+                "A saved project was found for ${file.name}.\nLoad your previous work?",
+                "Project Found",
+                JOptionPane.YES_NO_CANCEL_OPTION,
+                JOptionPane.QUESTION_MESSAGE,
+                null,
+                arrayOf("Load Project", "Start Fresh", "Cancel"),
+                "Load Project",
+            )
+            when (choice) {
+                JOptionPane.YES_OPTION -> {}
+                JOptionPane.NO_OPTION -> startFresh = true
+                else -> return
+            }
+        }
         session?.close()
         session = null
         clearEditors()
         project?.close()
         renames.store = NoRenames
-        val project = if (file.extension == Project.EXTENSION) Project.open(file) else Project.forInput(file)
+        val project = if (isProject) Project.open(file) else Project.forInput(file)
+        if (startFresh) project.resetContent()
         this.project = project
+        project.onDirty = { SwingUtilities.invokeLater { updateDirtyUi() } }
         renames.store = project
         renames.reload()
         recentFiles.add(file)
         updateRecentMenu()
-        saveItem.isEnabled = true
-        title = "jdex — ${(project.input() ?: file).name}"
+        projectName = (project.input() ?: file).name
+        updateDirtyUi()
         log.info("Opened project ${project.file.absolutePath}")
         analyze()
+    }
+
+    private fun updateDirtyUi() {
+        val p = project
+        val dirty = p?.isDirty() == true
+        saveItem.isEnabled = dirty
+        saveAsItem.isEnabled = p != null
+        title = projectName?.let { "jdex — $it${if (dirty) " *" else ""}" } ?: "jdex"
+    }
+
+    private fun saveProject() {
+        val p = project ?: return
+        runCatching { p.save() }.onFailure { log.log(Level.WARNING, "Save failed", it) }
+        updateDirtyUi()
+    }
+
+    private fun saveProjectAs() {
+        val p = project ?: return
+        val chooser = JFileChooser(p.file.parentFile)
+        chooser.fileFilter = FileNameExtensionFilter("jdex project (*.${Project.EXTENSION})", Project.EXTENSION)
+        chooser.selectedFile = p.file
+        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) return
+        var target = chooser.selectedFile
+        if (!target.name.endsWith(".${Project.EXTENSION}")) target = File(target.path + ".${Project.EXTENSION}")
+        runCatching { p.saveAs(target) }.onFailure {
+            log.log(Level.WARNING, "Save As failed", it)
+            JOptionPane.showMessageDialog(this, "Could not save project:\n${it.message}", "Save As", JOptionPane.ERROR_MESSAGE)
+            return
+        }
+        projectName = (p.input() ?: target).name
+        recentFiles.add(target)
+        updateRecentMenu()
+        updateDirtyUi()
+        log.info("Saved project as ${target.absolutePath}")
+    }
+
+    private fun confirmDiscardChanges(): Boolean {
+        val p = project ?: return true
+        if (!p.isDirty()) return true
+        val choice = JOptionPane.showOptionDialog(
+            this,
+            "Save changes to ${projectName ?: p.file.name}?",
+            "Unsaved Changes",
+            JOptionPane.YES_NO_CANCEL_OPTION,
+            JOptionPane.WARNING_MESSAGE,
+            null,
+            arrayOf("Save", "Don't Save", "Cancel"),
+            "Save",
+        )
+        return when (choice) {
+            JOptionPane.YES_OPTION -> { saveProject(); !p.isDirty() }
+            JOptionPane.NO_OPTION -> true
+            else -> false
+        }
     }
 
     private fun analyze() {

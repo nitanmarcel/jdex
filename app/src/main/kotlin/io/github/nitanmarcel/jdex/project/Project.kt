@@ -5,7 +5,25 @@ import java.security.MessageDigest
 import java.sql.Connection
 import java.sql.DriverManager
 
-class Project private constructor(val file: File, private val connection: Connection) : AutoCloseable, CommentStore, BookmarkStore, RenameStore, DexStore {
+class Project private constructor(file: File, connection: Connection) : AutoCloseable, CommentStore, BookmarkStore, RenameStore, DexStore {
+
+    var file = file
+        private set
+    private var connection = connection
+
+    private var dirty = false
+
+    var onDirty: (() -> Unit)? = null
+
+    fun isDirty() = dirty
+
+    private fun markDirty() {
+        if (!dirty) { dirty = true; onDirty?.invoke() }
+    }
+
+    private fun clearDirty() {
+        if (dirty) { dirty = false; onDirty?.invoke() }
+    }
 
     override fun importedDexes(): List<StoredDex> {
         val list = mutableListOf<StoredDex>()
@@ -29,7 +47,7 @@ class Project private constructor(val file: File, private val connection: Connec
             it.setBytes(2, patch.serialize())
             it.executeUpdate()
         }
-        save()
+        markDirty()
     }
 
     override fun saveImported(sha: String, name: String, bytes: ByteArray) {
@@ -39,7 +57,7 @@ class Project private constructor(val file: File, private val connection: Connec
             it.setBytes(3, bytes)
             it.executeUpdate()
         }
-        save()
+        markDirty()
     }
 
     override fun renames(): Map<String, String> {
@@ -62,7 +80,7 @@ class Project private constructor(val file: File, private val connection: Connec
                 it.executeUpdate()
             }
         }
-        save()
+        markDirty()
     }
 
     override fun toggle(line: Int): Boolean {
@@ -75,6 +93,7 @@ class Project private constructor(val file: File, private val connection: Connec
         } else {
             connection.prepareStatement("INSERT INTO bookmark(line) VALUES(?)").use { it.setInt(1, line); it.executeUpdate() }
         }
+        markDirty()
         return !exists
     }
 
@@ -102,6 +121,7 @@ class Project private constructor(val file: File, private val connection: Connec
                 it.executeUpdate()
             }
         }
+        markDirty()
     }
 
     override fun all(): Map<String, String> {
@@ -129,10 +149,34 @@ class Project private constructor(val file: File, private val connection: Connec
             }
         }
 
-    fun save() = connection.commit()
+    fun save() {
+        connection.commit()
+        clearDirty()
+    }
+
+    fun saveAs(target: File) {
+        if (target.absolutePath == file.absolutePath) { save(); return }
+        connection.commit()
+        connection.close()
+        file.copyTo(target, overwrite = true)
+        val nc = DriverManager.getConnection("jdbc:sqlite:${target.absolutePath}")
+        migrate(nc)
+        nc.autoCommit = false
+        connection = nc
+        file = target
+        clearDirty()
+    }
+
+    fun resetContent() {
+        connection.createStatement().use { st ->
+            for (table in listOf("rename", "comment", "bookmark", "imported_dex", "dex_patch")) {
+                st.executeUpdate("DELETE FROM $table")
+            }
+        }
+    }
 
     override fun close() {
-        save()
+        runCatching { if (!connection.autoCommit) connection.rollback() }
         connection.close()
     }
 
@@ -149,6 +193,7 @@ class Project private constructor(val file: File, private val connection: Connec
         fun forInput(input: File): Project =
             open(input.resolveSibling("${input.nameWithoutExtension}.$EXTENSION")).apply {
                 setInput(input)
+                save()
             }
 
         private fun migrate(connection: Connection) {
