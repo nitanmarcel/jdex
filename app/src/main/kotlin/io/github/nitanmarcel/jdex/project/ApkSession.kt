@@ -1,6 +1,7 @@
 package io.github.nitanmarcel.jdex.project
 
 import com.android.apksig.ApkVerifier
+import jadx.api.DecompilationMode as JadxMode
 import jadx.api.ICodeInfo
 import jadx.api.JadxArgs
 import jadx.api.JadxDecompiler
@@ -113,6 +114,12 @@ class ApkSession private constructor(
 
     class Decompiled(val title: String, val code: String, val sync: CodeSync)
 
+    enum class DecompileMode(val label: String, val sync: Boolean) {
+        JAVA("Java", true),
+        SIMPLE("Simple", true),
+        FALLBACK("Fallback", false),
+    }
+
     private val appliedRenames = HashMap<String, String>()
 
     fun syncRenames(map: Map<String, String>) {
@@ -140,13 +147,17 @@ class ApkSession private constructor(
         }
     }
 
-    fun decompile(name: String): Decompiled? {
+    fun decompile(name: String, mode: DecompileMode = DecompileMode.JAVA): Decompiled? {
         val cls = classesByRawName[name] ?: return null
         val top = cls.topParentClass
         val title = top.fullName.substringAfterLast('.')
         return runCatching {
-            val info = if (appliedRenames.isNotEmpty()) top.reload() else top.codeInfo
-            Decompiled(title, info.codeStr, buildSync(info))
+            val info = when (mode) {
+                DecompileMode.JAVA -> if (appliedRenames.isNotEmpty()) top.reload() else top.codeInfo
+                DecompileMode.SIMPLE -> top.classNode.decompileWithMode(JadxMode.SIMPLE)
+                DecompileMode.FALLBACK -> top.classNode.decompileWithMode(JadxMode.FALLBACK)
+            }
+            Decompiled(title, info.codeStr, if (mode.sync) buildSync(info) else CodeSync.EMPTY)
         }.getOrElse { Decompiled(title, "// failed to decompile $name: ${it.message}", CodeSync.EMPTY) }
     }
 

@@ -63,6 +63,12 @@ class JavaView(
         }
     }
 
+    fun setSyncState(state: State) {
+        if (syncCheck.state == state) return
+        syncCheck.state = state
+        if (!syncOn) clearHighlight()
+    }
+
     fun followTo(target: SyncTarget) {
         if (!syncOn) return
         val javaLine = sync.javaLineFor(target, approx) ?: return

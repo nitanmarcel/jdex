@@ -69,7 +69,7 @@ class MainWindow : JFrame("jdex") {
     private var session: ApkSession? = null
     private val renames = Renames()
     private var javaTab: EditorTab? = null
-    private var javaView: JavaView? = null
+    private var javaModes: JavaModesView? = null
     private var javaClass: String? = null
     private var syncState = FlatTriStateCheckBox.State.UNSELECTED
     private var bytecodeTab: EditorTab? = null
@@ -457,7 +457,7 @@ class MainWindow : JFrame("jdex") {
                         onUsages = { symbol -> session?.usages(symbol) },
                         renames = renames,
                         onRenamed = { renamesChanged() },
-                        onCaret = { target -> javaView?.followTo(target) },
+                        onCaret = { target -> javaModes?.followTo(target) },
                         cfgProvider = { raw, shortId -> session?.methodCfg(raw, shortId) },
                     )
                     val tab = EditorTab(tabId, title, view, source)
@@ -490,7 +490,7 @@ class MainWindow : JFrame("jdex") {
             Docking.deregisterDockable(it)
         }
         javaTab = null
-        javaView = null
+        javaModes = null
         javaClass = null
     }
 
@@ -538,36 +538,36 @@ class MainWindow : JFrame("jdex") {
     }
 
     private fun showJava(className: String) {
-        val session = session ?: return
+        if (session == null) return
         javaClass = className
-        scope.launch {
-            val result = withContext(Dispatchers.Default) {
-                session.syncRenames(renames.snapshot())
-                session.decompile(className)
-            } ?: return@launch
-            javaTab?.let {
-                if (Docking.isDocked(it)) Docking.undock(it)
-                Docking.deregisterDockable(it)
-            }
-            val view = JavaView(
-                result.code,
-                result.sync,
-                onCaret = { target -> bytecodeView?.followFromJava(target) },
-                syncInitial = syncState,
-                onSyncToggle = { state ->
-                    syncState = state
-                    bytecodeView?.syncApprox = state == FlatTriStateCheckBox.State.INDETERMINATE
-                    if (state == FlatTriStateCheckBox.State.UNSELECTED) bytecodeView?.clearSyncHighlight()
-                },
-            )
-            val tab = EditorTab("decompiled", result.title, view)
-            javaTab = tab
-            javaView = view
-            val target = bytecodeTab
-            if (target != null && Docking.isDocked(target)) Docking.dock(tab, target, DockingRegion.EAST, 0.5)
-            else Docking.dock(tab, this@MainWindow, DockingRegion.EAST, 0.5)
-            log.info("Decompiled $className")
+        javaTab?.let {
+            if (Docking.isDocked(it)) Docking.undock(it)
+            Docking.deregisterDockable(it)
         }
+        val view = JavaModesView(
+            decompile = { mode, onResult ->
+                scope.launch {
+                    val result = withContext(Dispatchers.Default) {
+                        session?.let { it.syncRenames(renames.snapshot()); it.decompile(className, mode) }
+                    }
+                    onResult(result)
+                }
+            },
+            onCaret = { target -> bytecodeView?.followFromJava(target) },
+            syncState = syncState,
+            onSyncToggle = { state ->
+                syncState = state
+                bytecodeView?.syncApprox = state == FlatTriStateCheckBox.State.INDETERMINATE
+                if (state == FlatTriStateCheckBox.State.UNSELECTED) bytecodeView?.clearSyncHighlight()
+            },
+        )
+        val tab = EditorTab("decompiled", className.substringAfterLast('.'), view)
+        javaTab = tab
+        javaModes = view
+        val target = bytecodeTab
+        if (target != null && Docking.isDocked(target)) Docking.dock(tab, target, DockingRegion.EAST, 0.5)
+        else Docking.dock(tab, this@MainWindow, DockingRegion.EAST, 0.5)
+        log.info("Decompiled $className")
     }
 
     private fun updateRecentMenu() {
