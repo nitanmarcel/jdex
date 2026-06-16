@@ -1,6 +1,8 @@
 # jdex
 Apk disassembler and decompiler based on [jadx](https://github.com/skylot/jadx)
 
+![Alt text](public/jdex.png)
+
 # Building
 * Requires java 21
 
