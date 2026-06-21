@@ -14,9 +14,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.swing.Swing
 import kotlinx.coroutines.withContext
 import io.github.nitanmarcel.jdex.RecentFiles
+import io.github.nitanmarcel.jdex.disasm.JniName
 import io.github.nitanmarcel.jdex.project.ApkSession
+import io.github.nitanmarcel.jdex.project.BinaryContent
 import io.github.nitanmarcel.jdex.project.CodeContent
 import io.github.nitanmarcel.jdex.project.Content
+import io.github.nitanmarcel.jdex.project.NativeContent
+import io.github.nitanmarcel.jdex.project.Syntax
 import io.github.nitanmarcel.jdex.project.Dex
 import io.github.nitanmarcel.jdex.project.DexPatch
 import io.github.nitanmarcel.jdex.project.HMembers
@@ -63,17 +67,23 @@ class MainWindow : JFrame("jdex") {
     private var projectName: String? = null
     private val scope = CoroutineScope(Dispatchers.Swing)
     private val openTabs = LinkedHashMap<String, EditorTab>()
+    private val nativeViews = ArrayList<Triple<EditorTab, VirtualCodeView, io.github.nitanmarcel.jdex.project.LineSource>>()
     private lateinit var explorer: FilesPanel
     private lateinit var hierarchy: HierarchyPanel
     private var project: Project? = null
     private var session: ApkSession? = null
     private val renames = Renames()
     private var javaTab: EditorTab? = null
+    private var pseudoTab: EditorTab? = null
     private var javaModes: JavaModesView? = null
     private var javaClass: String? = null
     private var syncState = FlatTriStateCheckBox.State.UNSELECTED
     private var bytecodeTab: EditorTab? = null
     private var bytecodeView: VirtualCodeView? = null
+    private var dexBytecodeTab: EditorTab? = null
+    private var dexBytecodeView: VirtualCodeView? = null
+    private var hierarchyClasses: List<io.github.nitanmarcel.jdex.project.HClass> = emptyList()
+    private var hierarchyNativeView: VirtualCodeView? = null
     private lateinit var scripting: ScriptPanel
 
     init {
@@ -385,7 +395,9 @@ class MainWindow : JFrame("jdex") {
                 .onSuccess { loaded ->
                     session = loaded
                     explorer.show(loaded.root)
-                    hierarchy.show(loaded.topClasses())
+                    hierarchyClasses = loaded.topClasses()
+                    hierarchyNativeView = null
+                    hierarchy.show(hierarchyClasses)
                     val malformed = if (loaded.malformedDexes.isNotEmpty()) ", ${loaded.malformedDexes.size} malformed dex" else ""
                     log.info("Loaded ${input.name}: package=${loaded.appPackage ?: "n/a"}, certs=${loaded.certificateCount}$malformed")
                     explorer.bytecode()?.let { (id, title, load) -> openView(id, title, load) }
@@ -435,29 +447,122 @@ class MainWindow : JFrame("jdex") {
             val content = withContext(Dispatchers.Default) {
                 runCatching { load() }.getOrElse { TextContent("Failed to load: ${it.message}") }
             }
-            if (content is CodeContent) {
-                openCode(tabId, title, content)
-            } else {
-                val tab = EditorTab(tabId, title, Editors.component(content))
-                openTabs[tabId] = tab
-                Docking.dock(tab, "editors", DockingRegion.CENTER)
+            when (content) {
+                is CodeContent -> openCode(tabId, title, content)
+                is NativeContent -> openNative(tabId, title, content)
+                else -> {
+                    val tab = EditorTab(tabId, title, Editors.component(content))
+                    openTabs[tabId] = tab
+                    Docking.dock(tab, "editors", DockingRegion.CENTER)
+                }
             }
         }
     }
 
+    private fun openText(title: String, text: String, syntax: Syntax, north: javax.swing.JComponent?): CodeTextArea {
+        pseudoTab?.let {
+            if (Docking.isDocked(it)) Docking.undock(it)
+            Docking.deregisterDockable(it)
+        }
+        val area = CodeTextArea(text, syntax)
+        val pane = SearchableTextPane(area)
+        val content = if (north != null) javax.swing.JPanel(java.awt.BorderLayout()).apply {
+            add(north, java.awt.BorderLayout.NORTH)
+            add(pane, java.awt.BorderLayout.CENTER)
+        } else pane
+        val tab = EditorTab("pseudo", title, content)
+        pseudoTab = tab
+        val target = bytecodeTab
+        if (target != null && Docking.isDocked(target)) Docking.dock(tab, target, DockingRegion.EAST, 0.5)
+        else Docking.dock(tab, this@MainWindow, DockingRegion.EAST, 0.5)
+        return area
+    }
+
+    private fun openNative(tabId: String, title: String, content: NativeContent) {
+        val elf = io.github.nitanmarcel.jdex.disasm.ElfFile.parse(content.bytes)
+        if (elf == null) {
+            val tab = EditorTab(tabId, title, Editors.component(BinaryContent(content.bytes)))
+            openTabs[tabId] = tab
+            Docking.dock(tab, "editors", DockingRegion.CENTER)
+            return
+        }
+        val choice = DisassemblerDialog.show(this, content.name, elf) ?: return
+        val x86Is32 = when (choice.arch) {
+            io.github.nitanmarcel.jdex.disasm.ElfArch.X86 -> true
+            io.github.nitanmarcel.jdex.disasm.ElfArch.X86_64 -> false
+            else -> null
+        }
+        val hash = java.security.MessageDigest.getInstance("SHA-256").digest(content.bytes)
+            .take(4).joinToString("") { "%02x".format(it) }
+        val variant = "${choice.disassembler.id}.${choice.arch.name.lowercase()}.${if (choice.littleEndian) "le" else "be"}"
+        val nativeId = "$hash:${content.name.substringAfterLast('/')}:$variant"
+        val segments = (elf.textSections + elf.dataSections)
+            .sortedBy { it.addr }
+            .map { (it.name.ifEmpty { "seg_${it.addr.toString(16)}" }) to it.addr }
+        val info = buildNativeInfo(elf, content.bytes, choice.arch, choice.littleEndian)
+        val code = CodeContent(Syntax.ASM, x86Is32, nativeId, segments, info) { progress, cancel ->
+            io.github.nitanmarcel.jdex.disasm.NativeListing.build(elf, choice.disassembler, choice.arch, choice.littleEndian, progress, cancel, info.summary)
+        }
+        openCode(tabId, title, code)
+    }
+
+    private fun buildNativeInfo(
+        elf: io.github.nitanmarcel.jdex.disasm.ElfFile, bytes: ByteArray,
+        arch: io.github.nitanmarcel.jdex.disasm.ElfArch, little: Boolean,
+    ): io.github.nitanmarcel.jdex.project.NativeInfo {
+        val exports = elf.functions.filter { it.name.isNotEmpty() }
+            .associate { it.name to it.address }.toList().sortedBy { it.first.lowercase() }
+        val imports = elf.relocs.entries.groupBy { it.value }
+            .map { (name, e) -> name to e.minOf { it.key } }.sortedBy { it.first.lowercase() }
+        val byAddr = elf.functions.filter { it.name.isNotEmpty() }.associate { it.address to it.name }
+        val ptr = if (elf.is64) 8 else 4
+        val constructors = ArrayList<Pair<String, Long>>()
+        for (sec in elf.sections.filter { it.name == ".init_array" || it.name == ".fini_array" }) {
+            var v = sec.addr
+            while (v + ptr <= sec.addr + sec.size) {
+                elf.relocatedPointerAt(v)?.takeIf { it != 0L }?.let {
+                    constructors.add((byAddr[it] ?: "sub_${it.toString(16)}") to it)
+                }
+                v += ptr
+            }
+        }
+        val eType = java.nio.ByteBuffer.wrap(bytes).order(if (little) java.nio.ByteOrder.LITTLE_ENDIAN else java.nio.ByteOrder.BIG_ENDIAN).getShort(16).toInt() and 0xFFFF
+        val kind = when (eType) { 2 -> "Executable"; 3 -> "Shared object (PIE)"; 1 -> "Relocatable"; else -> "type $eType" }
+        val stripped = elf.sections.none { it.name == ".symtab" }
+        val canary = elf.relocs.values.any { it.startsWith("__stack_chk") } || elf.functions.any { it.name.startsWith("__stack_chk") }
+        val dyn = elf.dynamic()
+        val summary = ArrayList<String>()
+        summary.add("File format : ELF${if (elf.is64) "64" else "32"} for ${arch.name} ($kind)")
+        dyn.soname?.let { summary.add("Shared name : '$it'") }
+        dyn.needed.forEach { summary.add("Needed lib  : '$it'") }
+        summary.add("Processor   : ${arch.name}   Byte sex: ${if (little) "little-endian" else "big-endian"}")
+        summary.add("Entry point : 0x${elf.entry.toString(16)}")
+        summary.add("Symbols     : ${if (stripped) "stripped (.dynsym only)" else "present (.symtab)"}   Stack canary: ${if (canary) "yes" else "no"}")
+        summary.add("Counts      : ${exports.size} functions, ${imports.size} imports, ${constructors.size} constructors")
+        return io.github.nitanmarcel.jdex.project.NativeInfo(exports, imports, constructors, summary)
+    }
+
     private fun openCode(tabId: String, title: String, content: CodeContent) {
         val cancelled = AtomicBoolean(false)
-        val dialog = LoadingDialog(this, "Generating bytecode", onCancel = { cancelled.set(true) })
+        val label = if (content.syntax == Syntax.ASM) "Disassembling" else "Generating bytecode"
+        val unit = if (content.syntax == Syntax.ASM) "bytes" else "classes"
+        val dialog = LoadingDialog(this, label, unit, onCancel = { cancelled.set(true) })
         Thread({
-            val source = runCatching {
+            val result = runCatching {
                 content.generate({ current, total -> SwingUtilities.invokeLater { dialog.progress(current, total) } }, cancelled::get)
-            }.getOrNull()
+            }
+            result.exceptionOrNull()?.let { if (it !is io.github.nitanmarcel.jdex.project.GenerationCancelled) log.log(Level.WARNING, "Generation failed", it) }
+            val source = result.getOrNull()
             SwingUtilities.invokeLater {
                 dialog.dispose()
                 if (source != null && !cancelled.get()) {
                     val view = VirtualCodeView(
                         source,
                         content.syntax,
+                        x86Is32 = content.x86Is32,
+                        nativeId = content.nativeId,
+                        nativeSegments = content.nativeSegments ?: emptyList(),
+                        nativeInfo = content.nativeInfo,
                         onDecompile = { className -> showJava(className) },
                         onResource = { type, name -> explorer.openResource(type, name) },
                         comments = project ?: NoComments,
@@ -468,14 +573,26 @@ class MainWindow : JFrame("jdex") {
                         onRenamed = { renamesChanged() },
                         onCaret = { target -> javaModes?.followTo(target) },
                         cfgProvider = { raw, shortId -> session?.methodCfg(raw, shortId) },
+                        onText = { title, text, syntax, north -> openText(title, text, syntax, north) },
+                        onNativeJump = { cls, method, sig -> jumpToNativeExport(cls, method, sig) },
+                        onBytecodeJump = { symbol, jniName, jniSig -> jumpToBytecodeMethod(symbol, jniName, jniSig) },
+                        onNativeExportRename = { symbol, jniName, jniSig, name -> propagateExportRename(symbol, jniName, jniSig, name) },
+                        onActivated = { v -> onViewActivated(v) },
                     )
                     val tab = EditorTab(tabId, title, view, source)
                     openTabs[tabId] = tab
-                    bytecodeTab = tab
-                    bytecodeView = view
+                    if (content.syntax == Syntax.ASM) {
+                        nativeViews.add(Triple(tab, view, source))
+                        content.nativeId?.let { renames.setNativeJniBindings(it, buildJniBindings(source)) }
+                    } else {
+                        bytecodeTab = tab
+                        bytecodeView = view
+                        dexBytecodeTab = tab
+                        dexBytecodeView = view
+                    }
                     view.syncApprox = syncState == FlatTriStateCheckBox.State.INDETERMINATE
                     Docking.dock(tab, "editors", DockingRegion.CENTER)
-                    log.info("Opened bytecode (${source.lineCount} lines)")
+                    log.info("Opened ${if (content.syntax == Syntax.ASM) "disassembly" else "bytecode"} (${source.lineCount} lines)")
                 } else {
                     source?.close()
                     log.info("Bytecode generation cancelled")
@@ -492,8 +609,12 @@ class MainWindow : JFrame("jdex") {
             it.dispose()
         }
         openTabs.clear()
+        nativeViews.clear()
         bytecodeTab = null
         bytecodeView = null
+        dexBytecodeTab = null
+        dexBytecodeView = null
+        hierarchyNativeView = null
         javaTab?.let {
             if (Docking.isDocked(it)) Docking.undock(it)
             Docking.deregisterDockable(it)
@@ -501,11 +622,100 @@ class MainWindow : JFrame("jdex") {
         javaTab = null
         javaModes = null
         javaClass = null
+        pseudoTab?.let {
+            if (Docking.isDocked(it)) Docking.undock(it)
+            Docking.deregisterDockable(it)
+        }
+        pseudoTab = null
+    }
+
+    private fun jumpToNativeExport(className: String, method: String, signature: String): Boolean {
+        if (nativeViews.isEmpty()) return false
+        val cls = JniName.mangle(className.replace('.', '/'))
+        val m = JniName.mangle(method)
+        val args = signature.substringAfter('(').substringBefore(')')
+        val candidates = listOf("Java_${cls}_$m", "Java_${cls}_${m}__${JniName.mangle(args)}", method)
+        val ordered = nativeViews.sortedByDescending { it.second === hierarchyNativeView }
+        for ((tab, view, _) in ordered) {
+            if (!Docking.isDocked(tab)) continue
+            for (c in candidates) if (view.revealSection(c)) { Docking.bringToFront(tab); return true }
+        }
+        return false
+    }
+
+    private fun dexMethodKey(symbol: String?, jniName: String?, jniSig: String?): String? {
+        val s = session ?: return null
+        if (jniName != null && jniSig != null) return s.jniMethodKey(jniName, jniSig)
+        if (symbol != null) {
+            val (cls, method) = JniName.demangle(symbol) ?: return null
+            val shortId = s.nativeMethodShortId(cls, method, JniName.demangleArgs(symbol)) ?: return null
+            return "L${cls.replace('.', '/')};->$shortId"
+        }
+        return null
+    }
+
+    private fun jumpToBytecodeMethod(symbol: String, jniName: String?, jniSig: String?): Boolean {
+        val key = dexMethodKey(symbol, jniName, jniSig) ?: return false
+        val tab = dexBytecodeTab ?: return false
+        val view = dexBytecodeView ?: return false
+        val cls = key.substringBefore("->").removePrefix("L").removeSuffix(";").replace('/', '.')
+        if (Docking.isDocked(tab)) Docking.bringToFront(tab)
+        view.revealMethod(cls, key.substringAfter("->"))
+        return true
+    }
+
+    private fun propagateExportRename(symbol: String, jniName: String?, jniSig: String?, newName: String?) {
+        val key = dexMethodKey(symbol, jniName, jniSig) ?: return
+        renames.store.setRename(key, newName)
+    }
+
+    private fun buildJniBindings(source: io.github.nitanmarcel.jdex.project.LineSource): Map<String, String> {
+        val s = session ?: return emptyMap()
+        val map = HashMap<String, String>()
+        for ((label, line) in source.sections()) {
+            when {
+                label.startsWith("Java_") -> {
+                    val (cls, method) = JniName.demangle(label) ?: continue
+                    s.nativeMethodShortId(cls, method, JniName.demangleArgs(label))?.let { map[label] = "L${cls.replace('.', '/')};->$it" }
+                }
+                label.startsWith("sub_") || label.startsWith("loc_") || label.startsWith("off_") || label.startsWith("unk_") -> {}
+                else -> {
+                    val c = jniCommentAt(source, line) ?: continue
+                    s.jniMethodKey(c.first, c.second)?.let { map[label] = it }
+                }
+            }
+        }
+        return map
+    }
+
+    private fun jniCommentAt(source: io.github.nitanmarcel.jdex.project.LineSource, start: Int): Pair<String, String>? {
+        for (off in 0..4) {
+            val t = source.lines(start + off, 1).firstOrNull()?.trimStart() ?: break
+            if (t.startsWith("; Java native: ")) {
+                val rest = t.removePrefix("; Java native: ").trim()
+                return rest.substringBefore(' ') to rest.substringAfter(' ', "")
+            }
+            if (off > 0 && t.length >= 9 && t[8] == ':' && t.take(8).all { it.isDigit() || it in 'a'..'f' }) break
+        }
+        return null
+    }
+
+    private fun onViewActivated(view: VirtualCodeView) {
+        if (view.isNativeView) {
+            if (hierarchyNativeView === view) return
+            hierarchyNativeView = view
+            hierarchy.showNativeSymbols(view.nativeFunctions().map { (name, line) -> name to { view.goToLine(line) } })
+        } else if (hierarchyNativeView != null) {
+            hierarchyNativeView = null
+            hierarchy.show(hierarchyClasses)
+        }
     }
 
     private fun renamesChanged() {
         renames.reload()
         bytecodeView?.rerender()
+        if (dexBytecodeView !== bytecodeView) dexBytecodeView?.rerender()
+        nativeViews.forEach { (_, view, _) -> if (view !== bytecodeView) view.rerender() }
         hierarchy.refresh()
         refreshJava()
     }

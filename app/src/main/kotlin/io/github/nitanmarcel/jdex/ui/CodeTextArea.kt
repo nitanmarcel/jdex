@@ -23,6 +23,7 @@ class CodeTextArea(text: String, syntax: Syntax) : RSyntaxTextArea() {
         fun registerSyntaxStyles() {
             val factory = TokenMakerFactory.getDefaultInstance() as AbstractTokenMakerFactory
             factory.putMapping("text/smali", "io.github.nitanmarcel.jdex.syntax.BytecodeTokenMaker")
+            factory.putMapping("text/jdex-asm", "io.github.nitanmarcel.jdex.syntax.AsmTokenMaker")
         }
     }
 }

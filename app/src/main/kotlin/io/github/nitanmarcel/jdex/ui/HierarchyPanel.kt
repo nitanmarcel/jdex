@@ -56,6 +56,7 @@ class HierarchyPanel(
                 is HClass -> onClass(obj.rawName)
                 is HMethod -> onMethod(obj.declaringRawName, obj.shortId)
                 is HField -> onField(obj.declaringRawName, obj.name)
+                is NativeSym -> obj.go()
             }
         }
         tree.addMouseListener(object : MouseAdapter() {
@@ -98,6 +99,16 @@ class HierarchyPanel(
 
     fun clear() {
         root.removeAllChildren()
+        model.reload()
+    }
+
+    class NativeSym(val label: String, val go: () -> Unit) {
+        override fun toString() = label
+    }
+
+    fun showNativeSymbols(entries: List<Pair<String, () -> Unit>>) {
+        root.removeAllChildren()
+        entries.forEach { (label, go) -> root.add(DefaultMutableTreeNode(NativeSym(label, go))) }
         model.reload()
     }
 
@@ -192,6 +203,7 @@ class HierarchyPanel(
         ): Component {
             super.getTreeCellRendererComponent(tree, value, sel, expanded, leaf, row, hasFocus)
             when (val obj = (value as? DefaultMutableTreeNode)?.userObject) {
+                is NativeSym -> icon = Icons.METHOD
                 is PackageLabel -> icon = Icons.PACKAGE
                 is HClass -> {
                     icon = Icons.CLASS

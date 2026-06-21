@@ -4,13 +4,15 @@ Apk disassembler and decompiler based on [jadx](https://github.com/skylot/jadx)
 ![Alt text](public/jdex.png)
 
 # Building
-* Requires java 21
+* Requires Java 21
+* Requires CMake
 
-```sh 
+```sh
+git submodule update --init
 ./gradlew shadowJar
 ```
-```sh 
-java -jar app/build/libs/jdex.jar ~/Downloads/pinning-demo.apk
+```sh
+java -jar app/build/libs/jdex.jar
 ```
 
 # WIP 

@@ -1,5 +1,6 @@
 [versions]
 apksig = "8.13.2"
+jna = "5.14.0"
 binarydata = "0.2.2"
 bined = "0.2.2"
 coroutines = "1.11.0"
@@ -17,6 +18,7 @@ sqlite = "3.53.2.0"
 
 [libraries]
 apksig = { module = "com.android.tools.build:apksig", version.ref = "apksig" }
+jna = { module = "net.java.dev.jna:jna", version.ref = "jna" }
 bined-swing = { module = "org.exbin.bined:bined-swing", version.ref = "bined" }
 binary-data = { module = "org.exbin.auxiliary:binary_data", version.ref = "binarydata" }
 binary-data-array = { module = "org.exbin.auxiliary:binary_data-array", version.ref = "binarydata" }

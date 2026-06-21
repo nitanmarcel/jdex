@@ -19,6 +19,9 @@ interface LineSource : AutoCloseable {
 
     fun sectionStart(name: String): Int?
 
+    fun sections(): List<Pair<String, Int>>
+
+
     fun sectionEnd(line: Int): Int
 
     fun search(query: String, from: Int, forward: Boolean, ignoreCase: Boolean): Int?
@@ -91,6 +94,8 @@ class DiskLineSource private constructor(
         val index = sectionNames.indexOf(name)
         return if (index >= 0) sectionLines[index] else null
     }
+
+    override fun sections(): List<Pair<String, Int>> = sectionNames.indices.map { sectionNames[it] to sectionLines[it] }
 
     override fun sectionEnd(line: Int): Int {
         if (sectionLines.isEmpty()) return lineCount - 1

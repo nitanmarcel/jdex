@@ -13,6 +13,8 @@ repositories {
 
 dependencies {
     implementation(libs.apksig)
+    implementation(libs.jna)
+    implementation(project(":native"))
     implementation(libs.bined.swing)
     implementation(libs.binary.data)
     implementation(libs.binary.data.array)
@@ -50,6 +52,7 @@ application {
 
 tasks.named<Test>("test") {
     useJUnitPlatform()
+    maxHeapSize = "2g"
 }
 
 tasks.shadowJar {

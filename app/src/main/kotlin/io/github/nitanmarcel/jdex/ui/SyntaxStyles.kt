@@ -14,6 +14,8 @@ object SyntaxStyles {
         Syntax.HTML -> SyntaxConstants.SYNTAX_STYLE_HTML
         Syntax.CSS -> SyntaxConstants.SYNTAX_STYLE_CSS
         Syntax.PROPERTIES -> SyntaxConstants.SYNTAX_STYLE_PROPERTIES_FILE
+        Syntax.ASM -> "text/jdex-asm"
+        Syntax.C -> SyntaxConstants.SYNTAX_STYLE_C
         Syntax.NONE -> SyntaxConstants.SYNTAX_STYLE_NONE
     }
 }

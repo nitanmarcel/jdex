@@ -218,6 +218,35 @@ class ApkSession private constructor(
 
     fun classNode(rawName: String): JavaClass? = classesByRawName[rawName]
 
+    fun nativeMethodShortId(rawName: String, methodName: String, argDescriptor: String? = null): String? {
+        val cls = classesByRawName[rawName] ?: return null
+        val named = runCatching { cls.methods.filter { it.name == methodName } }.getOrDefault(emptyList())
+        val natives = named.filter { runCatching { it.methodNode.accessFlags.isNative }.getOrDefault(false) }
+        val pool = natives.ifEmpty { named }
+        val pick = when {
+            argDescriptor != null -> pool.firstOrNull { runCatching { it.methodNode.methodInfo.shortId.startsWith("$methodName($argDescriptor)") }.getOrDefault(false) }
+            pool.size == 1 -> pool[0]
+            else -> null
+        }
+        return runCatching { pick?.methodNode?.methodInfo?.shortId }.getOrNull()
+    }
+
+    fun isNativeMethod(rawName: String, shortId: String): Boolean {
+        val cls = classesByRawName[rawName] ?: return false
+        return runCatching {
+            cls.methods.any { it.methodNode.methodInfo.shortId == shortId && it.methodNode.accessFlags.isNative }
+        }.getOrDefault(false)
+    }
+
+    fun jniMethodKey(name: String, jniSignature: String): String? {
+        val target = "$name$jniSignature"
+        val keys = classesByRawName.values.mapNotNull { cls ->
+            if (runCatching { BytecodeWriter.methodShortIds(cls).contains(target) }.getOrDefault(false))
+                "${descOf(cls.rawName)}->$target" else null
+        }
+        return keys.singleOrNull()
+    }
+
     private fun resourceNames(): Map<Int, String> =
         runCatching { jadx.root.constValues.resourcesNames }.getOrDefault(emptyMap())
 
@@ -421,7 +450,7 @@ class ApkSession private constructor(
                 when {
                     rf.type == ResourceType.MANIFEST -> manifest = rf
                     name.startsWith("assets/") -> assets += name.removePrefix("assets/") to fileContent(input, rf)
-                    name.startsWith("lib/") -> libs += name.removePrefix("lib/") to null
+                    name.startsWith("lib/") -> libs += name.removePrefix("lib/") to nativeContent(input, rf)
                     name.startsWith("res/") -> res += name.removePrefix("res/") to fileContent(input, rf)
                     name == "resources.arsc" -> res += name to fileContent(input, rf)
                 }
@@ -501,6 +530,20 @@ class ApkSession private constructor(
                 null
             }
         }
+
+        private fun nativeContent(input: File, rf: ResourceFile): () -> Content = {
+            val bytes = readEntryFull(input, rf.originalName)
+            if (io.github.nitanmarcel.jdex.disasm.ElfFile.parse(bytes) != null)
+                NativeContent(rf.deobfName.substringAfterLast('/'), bytes)
+            else BinaryContent(bytes)
+        }
+
+        private fun readEntryFull(input: File, name: String): ByteArray = runCatching {
+            ZipFile(input).use { zip ->
+                val entry = zip.getEntry(name) ?: return@use ByteArray(0)
+                zip.getInputStream(entry).use { it.readBytes() }
+            }
+        }.getOrDefault(ByteArray(0))
 
         private fun fileContent(input: File, rf: ResourceFile): () -> Content = {
             val syntax = syntaxFor(rf.deobfName)

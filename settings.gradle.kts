@@ -12,3 +12,4 @@ plugins {
 
 rootProject.name = "jdex"
 include("app")
+include("native")

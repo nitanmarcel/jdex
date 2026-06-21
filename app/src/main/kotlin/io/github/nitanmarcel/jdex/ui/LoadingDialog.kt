@@ -13,7 +13,7 @@ import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JProgressBar
 
-class LoadingDialog(owner: Frame, title: String, private val onCancel: () -> Unit) :
+class LoadingDialog(owner: Frame, title: String, private val unit: String = "items", private val onCancel: () -> Unit) :
     JDialog(owner, title, true) {
 
     private val bar = JProgressBar().apply { isIndeterminate = true }
@@ -42,7 +42,7 @@ class LoadingDialog(owner: Frame, title: String, private val onCancel: () -> Uni
         bar.isIndeterminate = false
         bar.maximum = total
         bar.value = current
-        label.text = "Disassembling $current / $total classes"
+        label.text = "$current / $total $unit"
     }
 
     private fun cancel() {

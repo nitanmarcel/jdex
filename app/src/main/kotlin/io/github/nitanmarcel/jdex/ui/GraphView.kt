@@ -58,6 +58,7 @@ class GraphView(
     private val cfg: MethodCfg,
     private val rawName: String,
     private val host: GraphHost,
+    syntax: Syntax = Syntax.SMALI,
 ) : JComponent() {
 
     private val font = SyntaxThemes.editorFont()
@@ -75,7 +76,7 @@ class GraphView(
     private val methodKey = "L${rawName.replace('.', '/')};->${cfg.shortId}"
     private val methodId = "$rawName#${cfg.shortId}"
     private val registerToken = Regex("[vp]\\d+")
-    private val tokenMaker = TokenMakerFactory.getDefaultInstance().getTokenMaker(SyntaxStyles.mime(Syntax.SMALI))
+    private val tokenMaker = TokenMakerFactory.getDefaultInstance().getTokenMaker(SyntaxStyles.mime(syntax))
 
     private var syncBlock = -1
     private var syncInsn = -1
@@ -89,7 +90,6 @@ class GraphView(
     private val layerOf = HashMap<Int, Int>()
     private val flat = ArrayList<Pair<Int, Int>>()
     private val effLine = HashMap<Int, Int>()
-    private val edgeLane = HashMap<CfgEdge, Double>()
     private val edgePaths = ArrayList<EdgePath>()
     private var contentW = 0.0
     private var contentH = 0.0
@@ -134,7 +134,7 @@ class GraphView(
     private fun lineCols(l: GLine): Int = l.text.length + (l.comment?.let { ("    ; $it").length } ?: 0)
 
     private fun buildLayout() {
-        nodes.clear(); nodeByBlock.clear(); layerOf.clear(); flat.clear(); edgeLane.clear(); effLine.clear()
+        nodes.clear(); nodeByBlock.clear(); layerOf.clear(); flat.clear(); edgePaths.clear(); effLine.clear()
         var cur: Int? = null
         for (b in cfg.blocks) {
             val lines = buildLines(b)
@@ -185,23 +185,21 @@ class GraphView(
 
         val minX = nodes.minOf { it.rect.x }
         nodes.forEach { it.rect.x += margin - minX }
-        var right = nodes.maxOf { it.rect.maxX }
-
-        var lane = 0
-        for (edge in cfg.edges) {
-            if (edge.from == edge.to) continue
-            val la = layerOf[edge.from] ?: continue
-            val lb = layerOf[edge.to] ?: continue
-            if (lb - la != 1) { edgeLane[edge] = right + margin + lane * 18.0; lane++ }
-        }
-        contentW = (if (lane > 0) right + margin + lane * 18.0 else right) + margin
-        contentH = nodes.maxOf { it.rect.maxY } + margin
         computeEdgePaths()
+        val maxEdgeX = edgePaths.maxOfOrNull { p -> p.xs.maxOrNull() ?: 0.0 } ?: 0.0
+        contentW = maxOf(nodes.maxOf { it.rect.maxX }, maxEdgeX) + margin
+        contentH = maxOf(nodes.maxOf { it.rect.maxY }, edgePaths.maxOfOrNull { p -> p.ys.maxOrNull() ?: 0.0 } ?: 0.0) + margin
+    }
+
+    private fun adjacent(e: CfgEdge): Boolean {
+        val la = layerOf[e.from] ?: return false
+        val lb = layerOf[e.to] ?: return false
+        return e.from != e.to && lb - la == 1
     }
 
     private fun computeEdgePaths() {
         edgePaths.clear()
-        val direct = cfg.edges.filter { it.from != it.to && edgeLane[it] == null }
+        val direct = cfg.edges.filter { adjacent(it) }
         val outOf = direct.groupBy { it.from }.mapValues { (_, es) -> es.sortedBy { nodeByBlock[it.to]?.rect?.centerX ?: 0.0 } }
         val intoOf = direct.groupBy { it.to }.mapValues { (_, es) -> es.sortedBy { nodeByBlock[it.from]?.rect?.centerX ?: 0.0 } }
         fun spread(node: Node, list: List<CfgEdge>?, edge: CfgEdge): Double {
@@ -214,11 +212,7 @@ class GraphView(
         for (edge in cfg.edges) {
             val a = nodeByBlock[edge.from] ?: continue
             val b = nodeByBlock[edge.to] ?: continue
-            val chX = edgeLane[edge]
-            if (chX != null) {
-                val x1 = a.rect.maxX; val y1 = a.rect.centerY; val x2 = b.rect.maxX; val y2 = b.rect.centerY
-                edgePaths.add(EdgePath(edge, doubleArrayOf(x1, chX, chX, x2), doubleArrayOf(y1, y1, y2, y2), -1.0, 0.0))
-            } else {
+            if (adjacent(edge)) {
                 val outs = outOf[edge.from]
                 val x1 = spread(a, outs, edge); val y1 = a.rect.maxY
                 val x2 = spread(b, intoOf[edge.to], edge); val y2 = b.rect.y
@@ -226,8 +220,40 @@ class GraphView(
                 val i = outs?.indexOf(edge) ?: 0
                 val midY = (y1 + y2) / 2 + (i - (n - 1) / 2.0) * 5
                 edgePaths.add(EdgePath(edge, doubleArrayOf(x1, x1, x2, x2), doubleArrayOf(y1, midY, midY, y2), 0.0, 1.0))
+            } else {
+                edgePaths.add(routeOrthogonal(edge, a, b))
             }
         }
+    }
+
+    private fun routeOrthogonal(edge: CfgEdge, a: Node, b: Node): EdgePath {
+        val x1 = a.rect.centerX; val y1 = a.rect.maxY
+        val x2 = b.rect.centerX; val y2 = b.rect.y
+        val bandTop = minOf(a.rect.maxY, b.rect.y) - 4
+        val bandBot = maxOf(a.rect.maxY, b.rect.y) + 4
+        val occ = nodes.filter { it !== a && it !== b && it.rect.maxY > bandTop && it.rect.y < bandBot }
+            .map { (it.rect.x - 10) to (it.rect.maxX + 10) }
+        fun free(x: Double) = occ.none { x in it.first..it.second }
+        val colX = when {
+            free(x1) -> x1
+            free(x2) -> x2
+            else -> {
+                val candidates = occ.flatMap { listOf(it.first - 4, it.second + 4) } + listOf(x1, x2)
+                candidates.filter { free(it) }.minByOrNull { minOf(Math.abs(it - x1), Math.abs(it - x2)) }
+                    ?.coerceAtLeast(4.0) ?: x1
+            }
+        }
+        if (colX == x1 && colX == x2) {
+            return EdgePath(edge, doubleArrayOf(x1, x2), doubleArrayOf(y1, y2), 0.0, 1.0)
+        }
+        val yA = y1 + 10
+        val yB = y2 - 10
+        return EdgePath(
+            edge,
+            doubleArrayOf(x1, x1, colX, colX, x2, x2),
+            doubleArrayOf(y1, yA, yA, yB, yB, y2),
+            0.0, 1.0,
+        )
     }
 
     fun refresh() {

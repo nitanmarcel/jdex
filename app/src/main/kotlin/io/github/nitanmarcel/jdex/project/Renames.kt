@@ -21,6 +21,15 @@ class Renames(var store: RenameStore = NoRenames) {
     private val localRenames = HashMap<String, MutableMap<String, String>>()
     private val localReverse = HashMap<String, MutableMap<String, String>>()
     private val registerPattern = HashMap<String, Regex>()
+    private val nativeForward = HashMap<String, MutableMap<String, String>>()
+    private val nativeReverse = HashMap<String, MutableMap<String, String>>()
+    private val nativeTokenPat = HashMap<String, Regex>()
+    private val nativeJniBindings = HashMap<String, Map<String, String>>()
+
+    fun setNativeJniBindings(libId: String, bindings: Map<String, String>) {
+        nativeJniBindings[libId] = bindings
+        reload()
+    }
 
     init {
         reload()
@@ -31,8 +40,25 @@ class Renames(var store: RenameStore = NoRenames) {
         displayNames.clear()
         classDisplay.clear(); classReverse.clear(); methodReverse.clear(); fieldReverse.clear()
         localRenames.clear(); localReverse.clear(); registerPattern.clear()
-        displayNames.putAll(disambiguate(forward))
-        for (key in forward.keys) {
+        nativeForward.clear(); nativeReverse.clear()
+        val dex = forward.filterKeys { !it.startsWith("n:") }
+        displayNames.putAll(disambiguate(dex))
+        for ((key, name) in forward) {
+            if (!key.startsWith("n:")) continue
+            val rest = key.substring(2)
+            val token = rest.substringAfterLast(':')
+            val libId = rest.substringBeforeLast(':')
+            nativeForward.getOrPut(libId) { HashMap() }[token] = name
+            nativeReverse.getOrPut(libId) { HashMap() }[name] = token
+        }
+        for ((libId, bindings) in nativeJniBindings) {
+            for ((token, dexKey) in bindings) {
+                val disp = displayNames[dexKey] ?: continue
+                nativeForward.getOrPut(libId) { HashMap() }[token] = disp
+                nativeReverse.getOrPut(libId) { HashMap() }[disp] = token
+            }
+        }
+        for (key in dex.keys) {
             val name = displayNames[key] ?: continue
             if ('#' in key) {
                 val methodKey = key.substringBeforeLast('#')
@@ -95,6 +121,17 @@ class Renames(var store: RenameStore = NoRenames) {
     val active: Boolean get() = store !== NoRenames
 
     fun nameFor(key: String): String? = displayNames[key]
+
+    fun nativeDisplay(line: String, libId: String): String {
+        val map = nativeForward[libId] ?: return line
+        var s = line
+        for ((raw, disp) in map) if (raw in s) s = nativeTokenPat.getOrPut(raw) { Regex("\\b${Regex.escape(raw)}\\b") }.replace(s) { disp }
+        return s
+    }
+
+    fun nativeName(libId: String, raw: String): String? = nativeForward[libId]?.get(raw)
+
+    fun nativeRaw(libId: String, display: String): String? = nativeReverse[libId]?.get(display)
 
     fun snapshot(): Map<String, String> = forward
 

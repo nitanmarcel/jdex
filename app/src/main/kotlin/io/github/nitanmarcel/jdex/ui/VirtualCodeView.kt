@@ -65,7 +65,30 @@ class VirtualCodeView(
     private val onRenamed: () -> Unit = {},
     private val onCaret: (target: SyncTarget) -> Unit = {},
     private val cfgProvider: (rawName: String, shortId: String) -> io.github.nitanmarcel.jdex.project.MethodCfg? = { _, _ -> null },
+    private val onText: (title: String, text: String, syntax: Syntax, north: javax.swing.JComponent?) -> CodeTextArea? = { _, _, _, _ -> null },
+    private val x86Is32: Boolean? = null,
+    private val nativeId: String? = null,
+    private val nativeSegments: List<Pair<String, Long>> = emptyList(),
+    private val nativeInfo: io.github.nitanmarcel.jdex.project.NativeInfo? = null,
+    private val onNativeJump: (className: String, method: String, signature: String) -> Boolean = { _, _, _ -> false },
+    private val onBytecodeJump: (symbol: String, jniName: String?, jniSig: String?) -> Boolean = { _, _, _ -> false },
+    private val onNativeExportRename: (symbol: String, jniName: String?, jniSig: String?, name: String?) -> Unit = { _, _, _, _ -> },
+    private val onActivated: (VirtualCodeView) -> Unit = {},
 ) : JPanel(BorderLayout()) {
+
+    val isNativeView: Boolean get() = nativeId != null
+
+    fun nativeFunctions(): List<Pair<String, Int>> = source.sections()
+        .filter { !it.first.startsWith("loc_") }
+        .map { (nm, line) ->
+            val shown = nativeId?.let { renames.nativeName(it, nm) }
+                ?: (if (nm.startsWith("_Z")) io.github.nitanmarcel.jdex.disasm.CppDemangler.demangle(nm) else null)
+                ?: nm
+            shown to line
+        }
+        .sortedBy { it.first.lowercase() }
+
+    fun revealSection(name: String): Boolean = source.sectionStart(name)?.let { goToLine(it); true } ?: false
 
     private val commentCache = HashMap<String, String>()
     private val bookmarkLines = HashSet<Int>()
@@ -80,6 +103,7 @@ class VirtualCodeView(
     private val ascent = metrics.ascent
 
     private val tokenMaker = TokenMakerFactory.getDefaultInstance().getTokenMaker(SyntaxStyles.mime(syntax))
+    private val isAsm = syntax == Syntax.ASM
     private var scheme: SyntaxScheme = SyntaxScheme(true)
     private var background: Color = Color.WHITE
     private var foreground: Color = Color.BLACK
@@ -144,6 +168,9 @@ class VirtualCodeView(
         SyntaxThemes.register(rethemeable)
         commentCache.putAll(comments.all())
         bookmarkLines.addAll(bookmarks.bookmarks())
+        surface.addFocusListener(object : java.awt.event.FocusAdapter() {
+            override fun focusGained(e: java.awt.event.FocusEvent) = onActivated(this@VirtualCodeView)
+        })
 
         scrollArea = JPanel(BorderLayout()).apply {
             add(JPanel(BorderLayout()).apply { add(gutter, BorderLayout.WEST); add(surface, BorderLayout.CENTER) }, BorderLayout.CENTER)
@@ -176,8 +203,18 @@ class VirtualCodeView(
     private fun rawLineText(index: Int): String =
         source.lines(index, 1).firstOrNull() ?: ""
 
-    private fun displayLine(index: Int, raw: String): String =
-        if (!renames.hasAny()) raw else renames.display(raw, { source.sectionAt(index) }, { methodKeyAt(index) })
+    private fun renamedFromSuffix(raw: String): String {
+        val id = nativeId ?: return ""
+        val t = raw.trim()
+        if (t.length < 2 || t.last() != ':' || ' ' in t) return ""
+        val token = t.dropLast(1)
+        return if (renames.nativeName(id, token) != null) "    ; renamed from $token" else ""
+    }
+
+    private fun displayLine(index: Int, raw: String): String {
+        val r = if (!renames.hasAny()) raw else renames.display(raw, { source.sectionAt(index) }, { methodKeyAt(index) })
+        return if (nativeId != null) renames.nativeDisplay(r, nativeId) else r
+    }
 
     private fun methodKeyAt(index: Int): String? {
         val section = source.sectionAt(index) ?: return null
@@ -250,11 +287,33 @@ class VirtualCodeView(
     }
 
     private var lastSyncLine = -1
+    private var pseudoArea: CodeTextArea? = null
+    private var pseudoLineAddrs: LongArray = LongArray(0)
+    private var pseudoHl: Any? = null
+    private var pseudoSyncEnabled = false
 
     private fun reportCaret() {
         if (caret.line == lastSyncLine) return
         lastSyncLine = caret.line
         targetAt(caret.line)?.let { onCaret(it) }
+        syncPseudoFromAsm()
+    }
+
+    private fun clearPseudoHl() {
+        pseudoHl?.let { tag -> pseudoArea?.let { runCatching { it.removeLineHighlight(tag) } } }
+        pseudoHl = null
+    }
+
+    private fun syncPseudoFromAsm() {
+        if (!pseudoSyncEnabled) return
+        val area = pseudoArea ?: return
+        val t = rawLineText(caret.line).trimStart()
+        val addr = if (t.length >= 9 && t[8] == ':') t.take(8).toLongOrNull(16) else null
+        val ln = if (addr != null) pseudoLineAddrs.indexOfFirst { it == addr } else -1
+        if (ln < 0) return
+        pseudoHl?.let { runCatching { area.removeLineHighlight(it) } }
+        pseudoHl = runCatching { area.addLineHighlight(ln, UiColors.alpha(UiColors.accent(), 80)) }.getOrNull()
+        runCatching { area.modelToView(area.getLineStartOffset(ln))?.let { area.scrollRectToVisible(it) } }
     }
 
     private fun targetAt(index: Int): SyncTarget? {
@@ -404,7 +463,8 @@ class VirtualCodeView(
                         t == ".end method" -> curMethod = null
                     }
                 }
-                val line = (if (!renames.hasAny()) raw else renames.display(raw, { source.sectionAt(index) }, { curMethod })).replace("\t", "    ")
+                val dexed = if (!renames.hasAny()) raw else renames.display(raw, { source.sectionAt(index) }, { curMethod })
+                val line = (if (nativeId != null) renames.nativeDisplay(dexed, nativeId) else dexed).replace("\t", "    ") + renamedFromSuffix(raw)
                 val y = k * lineHeight
 
                 if ((index == hoverLine || index == hoverArrowSrc || index == hoverArrowTgt) && index != caret.line) {
@@ -481,7 +541,8 @@ class VirtualCodeView(
         private val laneStep = 6
         private val arrowStrip = 12 + maxLanes * laneStep
         private val digitsW = getFontMetrics(codeFont).charWidth('0') * (source.lineCount.coerceAtLeast(1).toString().length + 2)
-        private val width = digitsW + arrowStrip
+        private val segW = if (nativeSegments.isEmpty()) 0 else charWidth * (nativeSegments.maxOf { it.first.length } + 2)
+        private val width = digitsW + segW + arrowStrip
 
         private var hovered = -1
 
@@ -516,7 +577,7 @@ class VirtualCodeView(
             addMouseMotionListener(mouse)
         }
 
-        private fun laneXof(lane: Int) = digitsW + 5 + lane * laneStep
+        private fun laneXof(lane: Int) = digitsW + segW + 5 + lane * laneStep
 
         private fun arrowAt(mx: Int, my: Int): Int {
             val arrows = branchArrows(height / lineHeight + 1)
@@ -551,6 +612,7 @@ class VirtualCodeView(
                 g.color = if (index == caret.line) foreground else gutterColor
                 val label = (index + 1).toString()
                 g.drawString(label, digitsW - fm.charWidth('0') - fm.stringWidth(label), k * lineHeight + ascent)
+                if (segW > 0) segmentForLine(index)?.let { g.drawString(it, digitsW, k * lineHeight + ascent) }
             }
             paintBranchArrows(g as Graphics2D, visible)
         }
@@ -573,7 +635,7 @@ class VirtualCodeView(
                 var methodId = 0
                 for (j in 0 until winLen) {
                     val line = wlines.getOrNull(j) ?: continue
-                    if (line.trimStart().startsWith(".method")) methodId++
+                    if (!isAsm && line.trimStart().startsWith(".method")) methodId++
                     val bd = branchTarget(line) ?: continue
                     offToAbs[(methodId.toLong() shl 20) or bd[0].toLong()] = winStart + j
                     if (bd[1] >= 0) branches.add(intArrayOf(winStart + j, bd[0], bd[1], methodId))
@@ -626,7 +688,10 @@ class VirtualCodeView(
         }
     }
 
+    private val locRef = Regex("""\bloc_([0-9a-fA-F]+)\b""")
+
     private fun branchTarget(raw: String): IntArray? {
+        if (isAsm) return branchTargetAsm(raw)
         val t = raw.trimStart()
         if (t.length < 36 || t[8] != ':' || t[33] != ':') return null
         val codeOff = t.substring(29, 33).toIntOrNull(16) ?: return null
@@ -635,6 +700,14 @@ class VirtualCodeView(
         val target = if (mnem.startsWith("goto") || mnem.startsWith("if-"))
             (body.trimEnd().substringAfterLast(' ').toIntOrNull(16) ?: -1) else -1
         return intArrayOf(codeOff, target)
+    }
+
+    private fun branchTargetAsm(raw: String): IntArray? {
+        val t = raw.trimStart()
+        if (t.length < 10 || t[8] != ':') return null
+        val addr = (t.substring(0, 8).toLongOrNull(16) ?: return null).toInt()
+        val target = locRef.find(t, 9)?.groupValues?.get(1)?.toLongOrNull(16)?.toInt() ?: -1
+        return intArrayOf(addr, target)
     }
 
     private fun scrollBy(lines: Int) {
@@ -646,7 +719,8 @@ class VirtualCodeView(
     private fun anchorOf(line: String, lineIndex: Int): String? {
         val t = line.trimStart()
         return when {
-            t.length >= 9 && t[8] == ':' && t.take(8).all { it.isDigit() || it in 'a'..'f' } -> "i:${t.take(8)}"
+            t.length >= 9 && t[8] == ':' && t.take(8).all { it.isDigit() || it in 'a'..'f' } ->
+                if (nativeId != null) "i:$nativeId:${t.take(8)}" else "i:${t.take(8)}"
             t.startsWith("Class:") -> source.sectionAt(lineIndex)?.let { "c:$it" }
             t.startsWith(".method") -> source.sectionAt(lineIndex)?.let { "m:$it#${t.substringAfterLast(' ')}" }
             else -> null
@@ -659,7 +733,33 @@ class VirtualCodeView(
         graphView?.refresh()
     }
 
-    private fun renameSymbol() = symbolAtCaret()?.let { renameSymbol(it) }
+    private fun renameSymbol() {
+        if (isAsm && nativeId != null) renameNative() else symbolAtCaret()?.let { renameSymbol(it) }
+    }
+
+    private val nativeLabelToken = Regex("^(sub|loc|off|unk)_[0-9a-fA-F]+$")
+
+    private fun isRenameableNative(word: String): Boolean = nativeId != null && (
+        renames.nativeRaw(nativeId, word) != null || nativeLabelToken.matches(word) || source.sectionStart(word) != null)
+
+    private fun renameNative() {
+        if (!renames.active || nativeId == null) return
+        val word = wordAt(lineText(caret.line), caret.col)?.takeIf { isRenameableNative(it) } ?: return
+        val label = rawLineText(caret.line).trim().takeIf { it.length > 1 && it.endsWith(":") && ' ' !in it }?.dropLast(1)
+        val raw = label?.takeIf { source.sectionStart(it) != null } ?: renames.nativeRaw(nativeId, word) ?: word
+        val current = renames.nativeName(nativeId, raw) ?: raw
+        val input = JOptionPane.showInputDialog(this, "Rename:", current) ?: return
+        val name = input.trim()
+        val value = if (name.isEmpty() || name == raw) null else name
+        val (jniName, jniSig) = jniCommentFor(raw)
+        val isJni = raw.startsWith("Java_") || jniName != null
+        if (isJni) {
+            onNativeExportRename(raw, jniName, jniSig, value)
+        } else {
+            renames.store.setRename("n:$nativeId:$raw", value)
+        }
+        onRenamed()
+    }
 
     private fun renameSymbol(symbol: Symbol) {
         if (!renames.active) return
@@ -668,7 +768,8 @@ class VirtualCodeView(
         val current = renames.nameFor(key) ?: original ?: return
         val input = JOptionPane.showInputDialog(this, "Rename ${symbol.kind.name.lowercase()}:", current) ?: return
         val name = input.trim()
-        renames.store.setRename(key, if (name.isEmpty() || name == original) null else name)
+        val value = if (name.isEmpty() || name == original) null else name
+        renames.store.setRename(key, value)
         onRenamed()
     }
 
@@ -720,6 +821,87 @@ class VirtualCodeView(
             }
         })
         dialog.isVisible = true
+    }
+
+    private fun navList(title: String, entries: List<Pair<String, () -> Unit>>) {
+        if (entries.isEmpty()) { JOptionPane.showMessageDialog(this, "Nothing to show", title, JOptionPane.INFORMATION_MESSAGE); return }
+        val filter = javax.swing.JTextField()
+        val model = javax.swing.DefaultListModel<String>()
+        val shown = ArrayList<Int>()
+        fun refilter() {
+            val q = filter.text.trim().lowercase()
+            model.clear(); shown.clear()
+            entries.forEachIndexed { i, (label, _) -> if (q.isEmpty() || q in label.lowercase()) { model.addElement(label); shown.add(i) } }
+        }
+        refilter()
+        val list = JList(model).apply { selectionMode = ListSelectionModel.SINGLE_SELECTION; font = codeFont }
+        val panel = JPanel(BorderLayout(0, 4)).apply {
+            add(filter, BorderLayout.NORTH)
+            add(JScrollPane(list).apply { preferredSize = Dimension(720, 380) }, BorderLayout.CENTER)
+        }
+        val dialog = JOptionPane(panel, JOptionPane.PLAIN_MESSAGE).createDialog(this, title)
+        filter.document.addDocumentListener(object : javax.swing.event.DocumentListener {
+            override fun insertUpdate(e: javax.swing.event.DocumentEvent?) = refilter()
+            override fun removeUpdate(e: javax.swing.event.DocumentEvent?) = refilter()
+            override fun changedUpdate(e: javax.swing.event.DocumentEvent?) = refilter()
+        })
+        list.addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(e: MouseEvent) {
+                if (e.clickCount == 2 && list.selectedIndex >= 0) { entries[shown[list.selectedIndex]].second(); dialog.dispose() }
+            }
+        })
+        dialog.isVisible = true
+    }
+
+    private fun segmentForLine(index: Int): String? {
+        val t = rawLineText(index).trimStart()
+        if (!(t.length >= 9 && t[8] == ':')) return null
+        val addr = t.substring(0, 8).toLongOrNull(16) ?: return null
+        var name: String? = null
+        for ((n, a) in nativeSegments) { if (a <= addr) name = n else break }
+        return name
+    }
+
+    private fun symLabel(name: String): String =
+        (if (name.startsWith("_Z")) io.github.nitanmarcel.jdex.disasm.CppDemangler.demangle(name) else null) ?: name
+
+    private fun showExports() {
+        val info = nativeInfo ?: return
+        navList("Exports (${info.exports.size})", info.exports.map { (n, a) -> "%-44s %08x".format(symLabel(n), a) to { revealOffset(a) } })
+    }
+
+    private fun showImports() {
+        val info = nativeInfo ?: return
+        navList("Imports (${info.imports.size})", info.imports.map { (n, a) -> "%-44s %08x".format(symLabel(n), a) to { revealOffset(a) } })
+    }
+
+    private fun showConstructors() {
+        val info = nativeInfo ?: return
+        navList("Constructors (${info.constructors.size})", info.constructors.map { (n, a) -> "%-44s %08x".format(symLabel(n), a) to { revealOffset(a) } })
+    }
+
+    private fun gotoSymbol() {
+        navList("Go to symbol", nativeFunctions().map { (n, line) -> n to { goToLine(line) } })
+    }
+
+    private fun showSegments() {
+        val entries = nativeSegments.map { (name, addr) ->
+            "%-20s %08x".format(name, addr) to { revealOffset(addr) }
+        }
+        navList("Segments (${entries.size})", entries)
+    }
+
+    private fun showStrings() {
+        background {
+            val hits = source.findFrom("  \"", 0, 50000, false)
+            val entries = hits.mapNotNull { line ->
+                val t = source.lines(line, 1).firstOrNull() ?: return@mapNotNull null
+                val q = t.indexOf("  \"")
+                if (q < 0 || (q >= 2 && t[q - 1] == ';')) return@mapNotNull null
+                t.substring(q + 2) to { goToLine(line) }
+            }
+            SwingUtilities.invokeLater { navList("Strings (${entries.size})", entries) }
+        }
     }
 
     private fun copyAddress() {
@@ -917,15 +1099,24 @@ class VirtualCodeView(
         bind('A'.code, shortcut, "selectEnclosing") { selectEnclosing() }
         bind('F'.code, shortcut, "find") { openSearch() }
         bind('G'.code, shortcut, "goToAddress") { goToAddress() }
-        bind(KeyEvent.VK_X, 0, "xrefs") { findUsages() }
         bind(KeyEvent.VK_ENTER, 0, "gotoDef") { goToDefinition() }
-        bind(KeyEvent.VK_TAB, 0, "decompile") { decompile() }
-        bind(KeyEvent.VK_SPACE, 0, "toggleGraph") { toggleGraph() }
-        bind(KeyEvent.VK_DOWN, shortcut, "nextMethod") { gotoMethod(true) }
-        bind(KeyEvent.VK_UP, shortcut, "prevMethod") { gotoMethod(false) }
-        bind('C'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK, "copyMethod") { copyMethod() }
         bind(KeyEvent.VK_SLASH, 0, "comment") { addComment() }
-        bind(KeyEvent.VK_N, 0, "rename") { renameSymbol() }
+        bind(KeyEvent.VK_X, 0, "xrefs") { findUsages() }
+        bind(KeyEvent.VK_SPACE, 0, "toggleGraph") { toggleGraph() }
+        if (!isAsm) {
+            bind(KeyEvent.VK_TAB, 0, "decompile") { decompile() }
+            bind(KeyEvent.VK_DOWN, shortcut, "nextMethod") { gotoMethod(true) }
+            bind(KeyEvent.VK_UP, shortcut, "prevMethod") { gotoMethod(false) }
+            bind('C'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK, "copyMethod") { copyMethod() }
+            bind(KeyEvent.VK_N, 0, "rename") { renameSymbol() }
+        }
+        if (isAsm) bind(KeyEvent.VK_TAB, 0, "pseudo") { showPseudo() }
+        if (isAsm && nativeId != null) bind(KeyEvent.VK_N, 0, "rename") { renameSymbol() }
+        if (isAsm) {
+            bind('L'.code, shortcut, "gotoSymbol") { gotoSymbol() }
+            bind('L'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK, "segments") { showSegments() }
+            bind('S'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK, "strings") { showStrings() }
+        }
         bind('B'.code, shortcut, "bookmark") { toggleBookmark() }
         bind('A'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK, "findAction") { findAction() }
         bind(KeyEvent.VK_LEFT, KeyEvent.ALT_DOWN_MASK, "back") { back() }
@@ -958,29 +1149,49 @@ class VirtualCodeView(
     private fun showMenu(e: MouseEvent) {
         val symbol = symbolAtCaret()
         val shortcut = Toolkit.getDefaultToolkit().menuShortcutKeyMaskEx
-        val onInstruction = lineText(caret.line).trimStart().let { it.length >= 9 && it[8] == ':' }
+        val onInstruction = lineText(caret.line).trimStart().let { it.length >= 9 && it[8] == ':' && it.take(8).all { c -> c.isDigit() || c in 'a'..'f' } }
         JPopupMenu().apply {
             add(menuItem("Copy", 'C'.code, shortcut, enabled = selection() != null) { copySelection() })
             add(menuItem("Copy Address", enabled = onInstruction) { copyAddress() })
-            add(menuItem("Copy Reference", enabled = symbol != null) { copyReference() })
-            add(menuItem("Select Method/Class", 'A'.code, shortcut) { selectEnclosing() })
-            add(menuItem("Copy Method", 'C'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK, enabled = currentMethod() != null) { copyMethod() })
-            add(menuItem("Graph View", KeyEvent.VK_SPACE, 0, enabled = currentMethod() != null) { showGraph() })
+            if (!isAsm) {
+                add(menuItem("Copy Reference", enabled = symbol != null) { copyReference() })
+                add(menuItem("Select Method/Class", 'A'.code, shortcut) { selectEnclosing() })
+                add(menuItem("Copy Method", 'C'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK, enabled = currentMethod() != null) { copyMethod() })
+            }
+            val graphEnabled = if (isAsm) source.sectionAt(caret.line) != null else currentMethod() != null
+            add(menuItem("Graph View", KeyEvent.VK_SPACE, 0, enabled = graphEnabled) { showGraph() })
+            if (isAsm) add(menuItem("Pseudo-C", KeyEvent.VK_TAB, 0, enabled = source.sectionAt(caret.line) != null) { showPseudo() })
             addSeparator()
             add(menuItem("Find…", 'F'.code, shortcut) { openSearch() })
-            add(menuItem("Find Usages", KeyEvent.VK_X, 0, enabled = symbol != null) { findUsages() })
-            add(menuItem("Go to Definition", KeyEvent.VK_ENTER, 0, enabled = symbol != null) { goToDefinition() })
+            val usagesEnabled = if (isAsm) wordAt(lineText(caret.line), caret.col) != null else symbol != null
+            add(menuItem("Find Usages", KeyEvent.VK_X, 0, enabled = usagesEnabled) { findUsages() })
+            add(menuItem("Go to Definition", KeyEvent.VK_ENTER, 0, enabled = isAsm || symbol != null) { goToDefinition() })
             add(menuItem("Go to Branch Target", enabled = (branchTarget(rawLineText(caret.line))?.get(1) ?: -1) >= 0) { gotoBranchTarget() })
             add(menuItem("Go to Address…", 'G'.code, shortcut) { goToAddress() })
-            add(menuItem("Go to Main Activity") { goToMainActivity() })
+            if (!isAsm) add(menuItem("Go to Main Activity") { goToMainActivity() })
             addSeparator()
             add(menuItem("Toggle Bookmark", 'B'.code, shortcut) { toggleBookmark() })
             add(menuItem("Show Bookmarks…") { showBookmarks() })
+            if (isAsm) {
+                add(menuItem("Go to Symbol…", 'L'.code, shortcut) { gotoSymbol() })
+                add(menuItem("Segments…", 'L'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK) { showSegments() })
+                add(menuItem("Strings…", 'S'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK) { showStrings() })
+                if (nativeInfo != null) {
+                    add(menuItem("Exports…") { showExports() })
+                    add(menuItem("Imports…") { showImports() })
+                    add(menuItem("Constructors…") { showConstructors() })
+                }
+            }
             add(menuItem("Add / Edit Comment", KeyEvent.VK_SLASH, 0, enabled = anchorOf(rawLineText(caret.line), caret.line) != null) { addComment() })
-            add(menuItem("Rename…", KeyEvent.VK_N, 0, enabled = symbol?.renameKey != null && renames.active) { renameSymbol() })
+            if (!isAsm) {
+                add(menuItem("Rename…", KeyEvent.VK_N, 0, enabled = symbol?.renameKey != null && renames.active) { renameSymbol() })
+            } else if (nativeId != null) {
+                val canRename = renames.active && wordAt(lineText(caret.line), caret.col)?.let { isRenameableNative(it) } == true
+                add(menuItem("Rename…", KeyEvent.VK_N, 0, enabled = canRename) { renameSymbol() })
+            }
             addSeparator()
             add(menuItem("Find Action…", 'A'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK) { findAction() })
-            add(menuItem("Decompile to Java", KeyEvent.VK_TAB, 0) { decompile() })
+            if (!isAsm) add(menuItem("Decompile to Java", KeyEvent.VK_TAB, 0) { decompile() })
         }.show(surface, e.x, e.y)
     }
 
@@ -1062,10 +1273,101 @@ class VirtualCodeView(
         if (graphView != null) showText() else showGraph()
     }
 
+    private fun nativeFunctionBounds(lines: List<String>, idx: Int): Pair<Int, Int> {
+        fun isFuncLabel(t: String) = t.endsWith(":") && t.length > 1 && (t[0].isLetter() || t[0] == '_') && !t.startsWith("loc_") && ' ' !in t
+        fun isRet(raw: String): Boolean {
+            val t = raw.trimStart()
+            if (t.length < 10 || t[8] != ':') return false
+            val rest = t.substring(9).trim()
+            val mnem = rest.substringAfter(' ').trim().substringBefore(' ')
+            return mnem == "ret" || mnem == "retaa" || mnem == "retab" || mnem == "eret"
+        }
+        var start = 0
+        var afterRet = -1
+        for (i in idx downTo 1) {
+            if (isFuncLabel(lines[i].trim())) { start = i; break }
+            if (afterRet < 0 && isRet(lines[i - 1])) afterRet = i
+        }
+        if (start == 0 && afterRet > 0) start = afterRet
+        var end = lines.size
+        var retEnd = -1
+        for (i in idx until lines.size) {
+            if (i > idx && isFuncLabel(lines[i].trim())) { end = i; break }
+            if (retEnd < 0 && isRet(lines[i])) retEnd = i + 1
+        }
+        if (end == lines.size && retEnd > 0) end = retEnd
+        return start to end
+    }
+
+    private fun nativeFunctionName(lines: List<String>, fs: Int, fe: Int): String {
+        val label = lines.getOrNull(fs)?.trim()
+        if (label != null && label.endsWith(":") && ' ' !in label && !label.startsWith("loc_") && (label[0].isLetter() || label[0] == '_'))
+            return label.dropLast(1)
+        for (i in fs until fe) {
+            val t = lines[i].trimStart()
+            if (t.length >= 9 && t[8] == ':' && t.take(8).all { it.isDigit() || it in 'a'..'f' }) return "sub_${t.substring(0, 8).toLong(16).toString(16)}"
+        }
+        return "sub_?"
+    }
+
+    private fun showPseudo() {
+        if (!isAsm) return
+        val section = source.sectionAt(caret.line) ?: return
+        val start = source.sectionStart(section) ?: return
+        val end = source.sectionEnd(start)
+        val chunk = source.lines(start, end - start + 1)
+        val (fs, fe) = nativeFunctionBounds(chunk, (caret.line - start).coerceIn(0, chunk.size - 1))
+        val rawName = nativeFunctionName(chunk, fs, fe)
+        val name = nativeId?.let { renames.nativeName(it, rawName) } ?: rawName
+        val pc = io.github.nitanmarcel.jdex.disasm.NativePseudo.forFunctionMapped(name, chunk.subList(fs, fe), x86Is32) { calleeArgCount(it) }
+        val shown = if (nativeId != null) pc.text.lineSequence().joinToString("\n") { renames.nativeDisplay(it, nativeId) } else pc.text
+        val syncCheck = javax.swing.JCheckBox("Sync caret", pseudoSyncEnabled).apply {
+            toolTipText = "Highlight the matching assembly/pseudo-code line as the caret moves"
+            addActionListener { pseudoSyncEnabled = isSelected; if (!isSelected) clearPseudoHl() }
+        }
+        val north = javax.swing.JPanel(java.awt.FlowLayout(java.awt.FlowLayout.LEFT, 4, 1)).apply { add(syncCheck) }
+        pseudoHl = null
+        val area = onText("Pseudo: $name", shown, Syntax.C, north)
+        pseudoArea = area
+        pseudoLineAddrs = pc.lineAddrs
+        if (area != null) {
+            val lineAddrs = pc.lineAddrs
+            area.addCaretListener { e ->
+                if (!pseudoSyncEnabled) return@addCaretListener
+                val ln = runCatching { area.getLineOfOffset(e.dot) }.getOrNull() ?: return@addCaretListener
+                val addr = lineAddrs.getOrElse(ln) { -1L }
+                if (addr >= 0) revealOffset(addr)
+            }
+        }
+    }
+
+    private val calleeArgCache = HashMap<String, Int?>()
+
+    private fun calleeArgCount(target: String): Int? = calleeArgCache.getOrPut(target) {
+        val ls = source.sectionStart(target) ?: return@getOrPut null
+        io.github.nitanmarcel.jdex.disasm.NativePseudo.argCount(source.lines(ls, 64))
+    }
+
     private fun showGraph() {
         if (graphView != null) return
-        val (raw, shortId) = currentMethod() ?: return
-        val cfg = cfgProvider(raw, shortId) ?: return
+        val raw: String
+        val cfg: io.github.nitanmarcel.jdex.project.MethodCfg
+        val graphSyntax: Syntax
+        if (isAsm) {
+            val section = source.sectionAt(caret.line) ?: return
+            val start = source.sectionStart(section) ?: return
+            val end = source.sectionEnd(start)
+            val chunk = source.lines(start, end - start + 1)
+            val (fs, fe) = nativeFunctionBounds(chunk, (caret.line - start).coerceIn(0, chunk.size - 1))
+            raw = nativeFunctionName(chunk, fs, fe)
+            cfg = io.github.nitanmarcel.jdex.disasm.NativeCfg.fromListing(raw, chunk.subList(fs, fe)) ?: return
+            graphSyntax = Syntax.ASM
+        } else {
+            val (r, shortId) = currentMethod() ?: return
+            raw = r
+            cfg = cfgProvider(r, shortId) ?: return
+            graphSyntax = Syntax.SMALI
+        }
         val host = object : GraphHost {
             override val renames get() = this@VirtualCodeView.renames
             override val comments get() = this@VirtualCodeView.comments
@@ -1077,7 +1379,7 @@ class VirtualCodeView(
             override fun reportCaret(target: SyncTarget) = onCaret(target)
             override fun back() = showText()
         }
-        val view = GraphView(cfg, raw, host)
+        val view = GraphView(cfg, raw, host, graphSyntax)
         graphView = view
         remove(scrollArea)
         add(view, BorderLayout.CENTER)
@@ -1111,7 +1413,53 @@ class VirtualCodeView(
 
     private fun goToDefinition() {
         if (gotoBranchTarget()) return
+        if (isAsm) { if (!tryBytecodeJump()) gotoSymbolAsm(); return }
+        if (tryNativeJump()) return
         symbolAtCaret()?.let { goToDefinition(it) }
+    }
+
+    private fun tryBytecodeJump(): Boolean {
+        if (nativeId == null) return false
+        val word = wordAt(lineText(caret.line), caret.col)?.let { renames.nativeRaw(nativeId, it) ?: it }
+        val lineLabel = rawLineText(caret.line).trimEnd().takeIf { it.endsWith(":") }?.removeSuffix(":")
+        val label = when {
+            word != null && word.startsWith("Java_") && source.sectionStart(word) != null -> word
+            lineLabel != null && source.sectionStart(lineLabel) != null -> lineLabel
+            else -> return false
+        }
+        if (label.startsWith("Java_")) return onBytecodeJump(label, null, null)
+        val (jniName, jniSig) = jniCommentFor(label)
+        return if (jniName != null) onBytecodeJump(label, jniName, jniSig) else false
+    }
+
+    private fun jniCommentFor(label: String): Pair<String?, String?> {
+        val start = source.sectionStart(label) ?: return null to null
+        for (off in 0..3) {
+            val c = rawLineText(start + off).trimStart()
+            if (c.startsWith("; Java native: ")) {
+                val rest = c.removePrefix("; Java native: ").trim()
+                return rest.substringBefore(' ') to rest.substringAfter(' ', "")
+            }
+            if (off > 0 && c.length >= 9 && c[8] == ':' && c.take(8).all { it.isDigit() || it in 'a'..'f' }) break
+        }
+        return null to null
+    }
+
+    private fun tryNativeJump(): Boolean {
+        val line = rawLineText(caret.line).trimStart()
+        if (!line.startsWith(".method")) return false
+        val sig = line.substringAfterLast(' ')
+        if ('(' !in sig || !line.substringBefore('(').split(' ').contains("native")) return false
+        val cls = source.sectionAt(caret.line) ?: return false
+        return onNativeJump(cls, sig.substringBefore('('), sig.substring(sig.indexOf('(')))
+    }
+
+    private fun gotoSymbolAsm() {
+        val w = wordAt(lineText(caret.line), caret.col) ?: return
+        val word = nativeId?.let { renames.nativeRaw(it, w) } ?: w
+        val loc = Regex("^loc_([0-9a-fA-F]+)$").find(word)
+        if (loc != null) { revealOffset(loc.groupValues[1].toLong(16)); return }
+        source.sectionStart(word)?.let { goToLine(it) }
     }
 
     private fun gotoBranchTarget(): Boolean = gotoBranchFrom(caret.line)
@@ -1119,6 +1467,7 @@ class VirtualCodeView(
     private fun gotoBranchFrom(line: Int): Boolean {
         val bd = branchTarget(rawLineText(line)) ?: return false
         if (bd[1] < 0) return false
+        if (isAsm) { revealOffset(bd[1].toLong() and 0xFFFFFFFFL); return true }
         val (start, end) = enclosingMethod(line) ?: return false
         val lines = source.lines(start, end - start + 1)
         for (i in lines.indices) {
@@ -1161,7 +1510,23 @@ class VirtualCodeView(
         }
     }
 
-    private fun findUsages() = symbolAtCaret()?.let { findUsages(it) }
+    private fun findUsages() {
+        if (isAsm) findUsagesAsm() else symbolAtCaret()?.let { findUsages(it) }
+    }
+
+    private fun findUsagesAsm() {
+        val w = wordAt(lineText(caret.line), caret.col) ?: return
+        val word = nativeId?.let { renames.nativeRaw(it, w) } ?: w
+        if (word.length < 3) return
+        background {
+            val hits = source.findFrom(word, 0, 2000, false)
+            val entries = hits.mapNotNull { line ->
+                val text = source.lines(line, 1).firstOrNull()?.trim() ?: ""
+                if (text == "$word:") null else line to text
+            }
+            SwingUtilities.invokeLater { showUsages(word, entries) }
+        }
+    }
 
     private fun findUsages(symbol: Symbol) {
         background {
