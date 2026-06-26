@@ -29,4 +29,5 @@ class NativeInfo(
     val imports: List<Pair<String, Long>>,
     val constructors: List<Pair<String, Long>>,
     val summary: List<String>,
+    val arch: String = "",
 )

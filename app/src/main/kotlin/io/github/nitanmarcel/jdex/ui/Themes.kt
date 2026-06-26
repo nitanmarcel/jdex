@@ -26,7 +26,7 @@ object Themes {
 
     class Def(val id: String, val label: String, val dark: Boolean, val syntax: String, val create: () -> FlatLaf)
 
-    val all: List<Def> = listOf(
+    private val curated: List<Def> = listOf(
         Def("light", "Light", false, "light") { FlatLightLaf() },
         Def("dark", "Dark", true, "dark") { FlatDarkLaf() },
         Def("intellij", "IntelliJ", false, "intellij") { FlatIntelliJLaf() },
@@ -44,18 +44,73 @@ object Themes {
         Def("solarized-dark", "Solarized Dark", true, "solarized-dark") { FlatSolarizedDarkIJTheme() },
     )
 
+    private val curatedClasses = setOf(
+        "com.formdev.flatlaf.intellijthemes.FlatArcIJTheme",
+        "com.formdev.flatlaf.intellijthemes.FlatArcDarkIJTheme",
+        "com.formdev.flatlaf.intellijthemes.FlatDraculaIJTheme",
+        "com.formdev.flatlaf.intellijthemes.FlatNordIJTheme",
+        "com.formdev.flatlaf.intellijthemes.FlatOneDarkIJTheme",
+        "com.formdev.flatlaf.intellijthemes.FlatGruvboxDarkHardIJTheme",
+        "com.formdev.flatlaf.intellijthemes.FlatMonocaiIJTheme",
+        "com.formdev.flatlaf.intellijthemes.FlatCobalt2IJTheme",
+        "com.formdev.flatlaf.intellijthemes.FlatXcodeDarkIJTheme",
+        "com.formdev.flatlaf.intellijthemes.FlatSolarizedLightIJTheme",
+        "com.formdev.flatlaf.intellijthemes.FlatSolarizedDarkIJTheme",
+    )
+
+    val all: List<Def> = curated + com.formdev.flatlaf.intellijthemes.FlatAllIJThemes.INFOS
+        .filter { it.className !in curatedClasses }
+        .map { info ->
+            Def(slug(info.name), info.name, info.isDark, if (info.isDark) "dark" else "light") {
+                Class.forName(info.className).getDeclaredConstructor().newInstance() as FlatLaf
+            }
+        }
+
+    private fun slug(s: String) = s.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
+
     fun select(id: String) {
         SyntaxThemes.baseId = def(id).syntax
         apply(id)
     }
 
-    val chromeKeys: List<Pair<String, String>> = listOf(
-        "@accentColor" to "Accent",
-        "@background" to "Background",
-        "@foreground" to "Foreground",
-        "@selectionBackground" to "Selection",
-        "Component.borderColor" to "Border",
-        "Component.focusColor" to "Focus",
+    class ChromeKey(val id: String, val label: String, val targets: List<String> = listOf(id))
+
+    val chromeKeys: List<ChromeKey> = listOf(
+        ChromeKey("@accentColor", "Accent"),
+        ChromeKey("@background", "Window background", listOf(
+            "@background", "Panel.background", "MenuBar.background", "ToolBar.background",
+            "TabbedPane.background", "Viewport.background", "ScrollPane.background",
+            "SplitPane.background", "RootPane.background", "OptionPane.background",
+            "TableHeader.background", "ModernDocking.headerBackground",
+            "PopupMenu.background", "Menu.background", "MenuItem.background",
+            "CheckBoxMenuItem.background", "RadioButtonMenuItem.background",
+            "TabbedPane.selectedBackground", "TabbedPane.focusColor",
+        )),
+        ChromeKey("componentBackground", "Component background", listOf(
+            "TextField.background", "FormattedTextField.background", "PasswordField.background",
+            "TextArea.background", "TextPane.background", "EditorPane.background",
+            "Spinner.background", "ComboBox.background", "ComboBox.nonEditableBackground",
+            "ComboBox.buttonBackground", "ComboBox.buttonEditableBackground", "ComboBox.buttonFocusedEditableBackground",
+            "List.background", "Tree.background", "Table.background",
+            "CheckBox.icon.background", "CheckBox.icon.selectedBackground",
+            "RadioButton.icon.background", "RadioButton.icon.selectedBackground",
+            "Button.background", "Button.startBackground", "Button.endBackground", "ToggleButton.background",
+        )),
+        ChromeKey("@foreground", "Foreground"),
+        ChromeKey("@selectionBackground", "Selection", listOf(
+            "@selectionBackground", "List.selectionBackground", "Tree.selectionBackground",
+            "Table.selectionBackground", "Table.lightSelectionBackground",
+            "Menu.selectionBackground", "MenuItem.selectionBackground",
+        )),
+        ChromeKey("Component.borderColor", "Border"),
+        ChromeKey("Component.focusColor", "Focus", listOf(
+            "Component.focusColor", "Component.focusedBorderColor", "Button.focusedBorderColor",
+        )),
+        ChromeKey("Actions.Red", "Error / breakpoint"),
+        ChromeKey("Actions.Yellow", "Warning / debug pointer"),
+        ChromeKey("Actions.Green", "Success / debug line"),
+        ChromeKey("Actions.Blue", "Info / bookmark"),
+        ChromeKey("Label.disabledForeground", "Disabled text"),
     )
 
     private val prefs = Preferences.userRoot().node("jdex/ui")
@@ -91,9 +146,11 @@ object Themes {
         uiFontSize = 0
     }
 
+    fun resetChromeColors() = chromePrefs.keys().forEach(chromePrefs::remove)
+
     fun apply(id: String = currentId) {
         val extra = HashMap<String, String>()
-        for ((key, _) in chromeKeys) chromeColor(key)?.let { extra[key] = hex(it) }
+        for (ck in chromeKeys) chromeColor(ck.id)?.let { c -> ck.targets.forEach { extra[it] = hex(c) } }
         FlatLaf.setGlobalExtraDefaults(extra)
         FlatLaf.setup(def(id).create())
         applyUiFont()
@@ -103,6 +160,7 @@ object Themes {
     }
 
     private fun applyUiFont() {
+        UIManager.put("defaultFont", null)
         val fam = uiFontFamily
         val size = uiFontSize
         if (fam == null && size <= 0) return

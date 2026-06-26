@@ -268,7 +268,7 @@ class DebugMemoryView : JPanel(BorderLayout()), Dockable {
     private val status = JLabel(" ")
     private val area = org.exbin.bined.swing.basic.CodeArea().apply {
         editMode = org.exbin.bined.EditMode.READ_ONLY
-        setCodeFont(Font(Font.MONOSPACED, Font.PLAIN, 12))
+        setCodeFont(SyntaxThemes.editorFont())
         resetColors()
     }
 

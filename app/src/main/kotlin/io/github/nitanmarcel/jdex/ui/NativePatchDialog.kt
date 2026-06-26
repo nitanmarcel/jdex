@@ -50,7 +50,8 @@ object NativePatchDialog {
             add(field, BorderLayout.NORTH)
             add(preview, BorderLayout.CENTER)
         }, BorderLayout.CENTER)
-        dialog.contentPane.add(JPanel().apply { add(ok); add(cancel) }, BorderLayout.SOUTH)
+        dialog.contentPane.add(JPanel(java.awt.FlowLayout(java.awt.FlowLayout.RIGHT)).apply { add(cancel); add(ok) }, BorderLayout.SOUTH)
+        dialog.rootPane.defaultButton = ok
         refresh()
         dialog.pack()
         dialog.setLocationRelativeTo(owner)

@@ -13,7 +13,7 @@ object AppThemeStore {
     fun snapshot(): Map<String, String> {
         val m = LinkedHashMap<String, String>()
         m["chrome.base"] = Themes.currentId
-        for ((key, _) in Themes.chromeKeys) Themes.chromeColor(key)?.let { m["chrome.$key"] = hex(it) }
+        for (ck in Themes.chromeKeys) Themes.chromeColor(ck.id)?.let { m["chrome.${ck.id}"] = hex(it) }
         Themes.uiFontFamily?.let { m["font.ui.family"] = it }
         if (Themes.uiFontSize > 0) m["font.ui.size"] = Themes.uiFontSize.toString()
 
@@ -32,7 +32,7 @@ object AppThemeStore {
     fun applySnapshot(m: Map<String, String>) {
         Themes.resetChrome()
         SyntaxThemes.resetOverrides()
-        for ((key, _) in Themes.chromeKeys) color(m["chrome.$key"])?.let { Themes.setChromeColor(key, it) }
+        for (ck in Themes.chromeKeys) color(m["chrome.${ck.id}"])?.let { Themes.setChromeColor(ck.id, it) }
         Themes.uiFontFamily = m["font.ui.family"]
         Themes.uiFontSize = m["font.ui.size"]?.toIntOrNull() ?: 0
 

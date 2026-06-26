@@ -79,9 +79,11 @@ class VirtualCodeView(
     private val onBytecodeJump: (symbol: String, jniName: String?, jniSig: String?) -> Boolean = { _, _, _ -> false },
     private val onNativeExportRename: (symbol: String, jniName: String?, jniSig: String?, name: String?) -> Unit = { _, _, _, _ -> },
     private val onActivated: (VirtualCodeView) -> Unit = {},
+    private val onPosition: (String) -> Unit = {},
 ) : JPanel(BorderLayout()) {
 
     val isNativeView: Boolean get() = nativeId != null
+    val binaryArch: String? get() = nativeInfo?.arch?.ifEmpty { null }
 
     fun nativeFunctions(): List<Pair<String, Int>> = source.sections()
         .filter { !it.first.startsWith("loc_") }
@@ -101,18 +103,20 @@ class VirtualCodeView(
     private val backStack = ArrayDeque<Int>()
     private val forwardStack = ArrayDeque<Int>()
 
-    private val codeFont = SyntaxThemes.editorFont()
-    private val metrics = getFontMetrics(codeFont)
-    private val lineHeight = metrics.height
-    private val charWidth = metrics.charWidth('m')
-    private val ascent = metrics.ascent
+    private var codeFont = SyntaxThemes.editorFont()
+    private var metrics = getFontMetrics(codeFont)
+    private var lineHeight = metrics.height
+    private var charWidth = metrics.charWidth('m')
+    private var ascent = metrics.ascent
 
-    private val tokenMaker = TokenMakerFactory.getDefaultInstance().getTokenMaker(SyntaxStyles.mime(syntax))
+    private val mimeType = SyntaxStyles.mime(syntax)
+    private val tokenMaker = TokenMakerFactory.getDefaultInstance().getTokenMaker(mimeType)
     private val isAsm = syntax == Syntax.ASM
     private var scheme: SyntaxScheme = SyntaxScheme(true)
     private var background: Color = Color.WHITE
     private var foreground: Color = Color.BLACK
     private var selectionColor: Color = Color(0xAD, 0xD6, 0xFF)
+    private var caretColor: Color = Color.BLACK
     private var gutterColor: Color = Color.GRAY
     private var currentLineColor: Color = Color(0, 0, 0, 20)
     private var hoverColor: Color = Color(0, 0, 0, 16)
@@ -147,6 +151,7 @@ class VirtualCodeView(
     var onEnableNative: (() -> Unit)? = null
     var nativeEnableVisible: () -> Boolean = { false }
     private val nativeBreakpoints = HashSet<Long>()
+    private val nativeBreakpointLines = HashSet<Int>()
 
     private var topLine = 0
     private var xOffset = 0
@@ -156,6 +161,8 @@ class VirtualCodeView(
 
     private val surface = Surface()
     private val gutter = Gutter()
+    private val ruler = OverviewRuler()
+    private val searchHitLines = HashSet<Int>()
     private val vBar = JScrollBar(JScrollBar.VERTICAL)
     private val hBar = JScrollBar(JScrollBar.HORIZONTAL)
     private var searchDialog: SearchDialog? = null
@@ -164,10 +171,24 @@ class VirtualCodeView(
 
     private val rethemeable = object : SyntaxThemes.Rethemeable {
         override fun retheme() {
+            refreshFont()
             applyTheme()
             surface.repaint()
-            gutter.repaint()
+            repaintMargins()
         }
+    }
+
+    private fun refreshFont() {
+        val font = SyntaxThemes.editorFont()
+        if (font == codeFont) return
+        codeFont = font
+        metrics = getFontMetrics(font)
+        lineHeight = metrics.height
+        charWidth = metrics.charWidth('m')
+        ascent = metrics.ascent
+        hBar.unitIncrement = charWidth
+        maxWidth = 0
+        revalidate()
     }
 
     private fun applyTheme() {
@@ -176,8 +197,9 @@ class VirtualCodeView(
         background = t.bgColor ?: Color.WHITE
         foreground = SyntaxThemes.foregroundOf(t)
         selectionColor = t.selectionBG ?: Color(0xAD, 0xD6, 0xFF)
+        caretColor = SyntaxThemes.editorColor("caret") ?: foreground
         gutterColor = Color(foreground.red, foreground.green, foreground.blue, 128)
-        currentLineColor = Color(foreground.red, foreground.green, foreground.blue, 20)
+        currentLineColor = SyntaxThemes.editorColor("currentLine") ?: UiColors.alpha(UiColors.accent(), 24)
         hoverColor = Color(foreground.red, foreground.green, foreground.blue, 45)
         commentColor = scheme.getStyle(TokenTypes.COMMENT_EOL)?.foreground ?: Color(0x00, 0x80, 0x00)
         val accent = UiColors.accent()
@@ -191,6 +213,7 @@ class VirtualCodeView(
         surface.foreground = foreground
         gutter.background = background
         gutter.foreground = foreground
+        ruler.repaint()
     }
 
     init {
@@ -203,14 +226,19 @@ class VirtualCodeView(
         })
 
         scrollArea = JPanel(BorderLayout()).apply {
-            add(JPanel(BorderLayout()).apply { add(gutter, BorderLayout.WEST); add(surface, BorderLayout.CENTER) }, BorderLayout.CENTER)
+            add(JPanel(BorderLayout()).apply {
+                add(gutter, BorderLayout.WEST)
+                add(surface, BorderLayout.CENTER)
+                add(ruler, BorderLayout.EAST)
+            }, BorderLayout.CENTER)
             add(vBar, BorderLayout.EAST)
             add(hBar, BorderLayout.SOUTH)
         }
         add(scrollArea, BorderLayout.CENTER)
 
         vBar.unitIncrement = 1
-        vBar.addAdjustmentListener { topLine = vBar.value; surface.repaint(); gutter.repaint() }
+        vBar.isVisible = false
+        vBar.addAdjustmentListener { topLine = vBar.value; surface.repaint(); repaintMargins() }
         hBar.unitIncrement = charWidth
         hBar.addAdjustmentListener { xOffset = hBar.value; surface.repaint() }
         surface.addComponentListener(object : ComponentAdapter() {
@@ -222,12 +250,82 @@ class VirtualCodeView(
 
     private fun visibleLines() = (surface.height / lineHeight).coerceAtLeast(1)
 
+    private fun repaintMargins() { gutter.repaint(); ruler.repaint() }
+
+    private fun tokenizeLine(text: String, maker: org.fife.ui.rsyntaxtextarea.TokenMaker, emit: (lex: String, col: Int, color: Color) -> Unit) {
+        if (text.isEmpty()) return
+        var token = maker.getTokenList(Segment(text.toCharArray(), 0, text.length), TokenTypes.NULL, 0)
+        var col = 0
+        while (token != null && token.isPaintable()) {
+            emit(token.lexeme, col, io.github.nitanmarcel.jdex.syntax.BytecodeStyle.color(token.type, scheme, foreground, background))
+            col += token.lexeme.length
+            token = token.nextToken
+        }
+    }
+
     private fun updateScrollBars() {
         val visible = visibleLines()
         vBar.setValues(topLine.coerceIn(0, (source.lineCount - visible).coerceAtLeast(0)), visible, 0, source.lineCount)
         vBar.blockIncrement = visible
         hBar.setValues(xOffset, surface.width, 0, maxWidth.coerceAtLeast(surface.width))
         hBar.blockIncrement = surface.width
+    }
+
+    private inner class OverviewRuler : JComponent() {
+        init {
+            preferredSize = Dimension(12, 0)
+            isOpaque = true
+            cursor = java.awt.Cursor.getPredefinedCursor(java.awt.Cursor.HAND_CURSOR)
+            val mouse = object : MouseAdapter() {
+                override fun mousePressed(e: MouseEvent) = jumpTo(e.y)
+                override fun mouseDragged(e: MouseEvent) = jumpTo(e.y)
+            }
+            addMouseListener(mouse); addMouseMotionListener(mouse)
+        }
+
+        private fun jumpTo(y: Int) {
+            val total = source.lineCount.coerceAtLeast(1)
+            val line = (y.toDouble() / height.coerceAtLeast(1) * total).toInt().coerceIn(0, total - 1)
+            val visible = visibleLines()
+            topLine = (line - visible / 2).coerceIn(0, (total - visible).coerceAtLeast(0))
+            vBar.value = topLine
+            surface.repaint(); repaintMargins()
+        }
+
+        override fun paintComponent(g: Graphics) {
+            val total = source.lineCount.coerceAtLeast(1)
+            val h = height
+            g.color = background
+            g.fillRect(0, 0, width, h)
+            g.color = UiColors.border()
+            g.drawLine(0, 0, 0, h)
+            fun yOf(line: Int) = (line.toDouble() / total * h).toInt()
+            val visible = visibleLines()
+            val vy = yOf(topLine)
+            val vh = (yOf((topLine + visible).coerceAtMost(total)) - vy).coerceAtLeast(4)
+            g.color = UiColors.alpha(foreground, 28)
+            g.fillRect(1, vy, width - 1, vh)
+            fun tick(line: Int, color: Color, thickness: Int) {
+                g.color = color
+                g.fillRect(2, (yOf(line) - thickness / 2).coerceIn(0, (h - thickness).coerceAtLeast(0)), width - 3, thickness)
+            }
+            fun spread(lines: Collection<Int>, color: Color, thickness: Int) {
+                if (lines.isEmpty()) return
+                g.color = color
+                var last = -1000
+                for (ln in lines.toSortedSet()) {
+                    var y = yOf(ln) - thickness / 2
+                    if (y < last + thickness + 1) y = last + thickness + 1
+                    y = y.coerceIn(0, (h - thickness).coerceAtLeast(0))
+                    g.fillRect(2, y, width - 3, thickness)
+                    last = y
+                }
+            }
+            searchHitLines.forEach { tick(it, highlightColor, 2) }
+            spread(bookmarkLines, bookmarkColor, 2)
+            spread(breakpointLines + nativeBreakpointLines, breakpointColor, 3)
+            debugLine?.let { tick(it, debugArrowColor, 3) }
+        }
     }
 
     private fun rawLineText(index: Int): String =
@@ -290,7 +388,7 @@ class VirtualCodeView(
         if (!extend) highlight = wordAt(lineText(caret.line), caret.col)
         ensureCaretVisible()
         surface.repaint()
-        gutter.repaint()
+        repaintMargins()
         reportCaret()
     }
 
@@ -311,7 +409,7 @@ class VirtualCodeView(
         vBar.value = (l - visible / 3).coerceIn(0, (source.lineCount - visible).coerceAtLeast(0))
         topLine = vBar.value
         surface.repaint()
-        gutter.repaint()
+        repaintMargins()
         if (focusSurface) surface.requestFocusInWindow()
         reportCaret()
     }
@@ -326,7 +424,29 @@ class VirtualCodeView(
         if (caret.line == lastSyncLine) return
         lastSyncLine = caret.line
         targetAt(caret.line)?.let { onCaret(it) }
+        onPosition(positionLabel(caret.line))
         syncPseudoFromAsm()
+    }
+
+    private fun positionLabel(index: Int): String {
+        val loc = locationLabel(index)
+        val sel = selection()?.let { (s, e) -> (e.line - s.line + 1).takeIf { it > 1 }?.let { "$it lines" } }
+        return when {
+            sel == null -> loc
+            loc.isEmpty() -> sel
+            else -> "$loc  ·  $sel"
+        }
+    }
+
+    private fun locationLabel(index: Int): String {
+        val t = rawLineText(index).trimStart()
+        if (t.length >= 9 && t[8] == ':') t.take(8).toLongOrNull(16)?.let { addr ->
+            val fn = source.sectionAt(index)
+            return (if (fn != null) "$fn  ·  " else "") + "0x%x".format(addr)
+        }
+        val mid = methodIdAt(index) ?: return ""
+        val name = mid.substringAfterLast('#')
+        return sourceLineAt(index)?.let { "$name  ·  line $it" } ?: name
     }
 
     private fun clearPseudoHl() {
@@ -555,7 +675,7 @@ class VirtualCodeView(
             }
 
             if (caret.line in topLine until topLine + visible) {
-                g.color = foreground
+                g.color = caretColor
                 val cx = caret.col * charWidth - xOffset
                 g.fillRect(cx, (caret.line - topLine) * lineHeight, 2, lineHeight)
             }
@@ -567,16 +687,9 @@ class VirtualCodeView(
         }
 
         private fun paintTokens(g: Graphics, line: String, baseline: Int) {
-            if (line.isEmpty()) return
-            val segment = Segment(line.toCharArray(), 0, line.length)
-            var token = tokenMaker.getTokenList(segment, TokenTypes.NULL, 0)
-            var col = 0
-            while (token != null && token.isPaintable()) {
-                val text = token.lexeme
-                g.color = io.github.nitanmarcel.jdex.syntax.BytecodeStyle.color(token.type, scheme, foreground, background)
-                g.drawString(text, col * charWidth - xOffset, baseline)
-                col += text.length
-                token = token.nextToken
+            tokenizeLine(line, tokenMaker) { lex, col, color ->
+                g.color = color
+                g.drawString(lex, col * charWidth - xOffset, baseline)
             }
         }
     }
@@ -585,11 +698,11 @@ class VirtualCodeView(
         private val maxLanes = 4
         private val laneStep = 6
         private val arrowStrip = 12 + maxLanes * laneStep
-        private val digitsW = getFontMetrics(codeFont).charWidth('0') * (source.lineCount.coerceAtLeast(1).toString().length + 2)
-        private val segW = if (nativeSegments.isEmpty()) 0 else charWidth * (nativeSegments.maxOf { it.first.length } + 2)
-        private val width = digitsW + segW + arrowStrip
+        private val markerW get() = charWidth + 12
+        private val segW get() = if (nativeSegments.isEmpty()) 0 else charWidth * (nativeSegments.maxOf { it.first.length } + 2)
 
         private var hovered = -1
+        private var bpHover = -1
 
         init {
             isOpaque = true
@@ -599,7 +712,7 @@ class VirtualCodeView(
                     if (idx >= 0) { goToLine(arrowList[idx][1]); return }
                     val line = topLine + e.y / lineHeight
                     if (line !in 0 until source.lineCount) return
-                    if (e.x <= digitsW && toggleBreakpoint(line)) return
+                    if (e.x <= markerW && toggleBreakpoint(line)) return
                     gotoBranchFrom(line)
                 }
 
@@ -612,11 +725,15 @@ class VirtualCodeView(
                         repaint(); surface.repaint()
                     }
                     val line = topLine + e.y / lineHeight
+                    val inMarker = e.x <= markerW && line in 0 until source.lineCount
+                    val newBpHover = if (inMarker) line else -1
+                    if (newBpHover != bpHover) { bpHover = newBpHover; repaint() }
                     val branchRow = line in 0 until source.lineCount && (branchTarget(rawLineText(line))?.get(1) ?: -1) >= 0
-                    cursor = java.awt.Cursor.getPredefinedCursor(if (idx >= 0 || branchRow) java.awt.Cursor.HAND_CURSOR else java.awt.Cursor.DEFAULT_CURSOR)
+                    cursor = java.awt.Cursor.getPredefinedCursor(if (idx >= 0 || branchRow || inMarker) java.awt.Cursor.HAND_CURSOR else java.awt.Cursor.DEFAULT_CURSOR)
                 }
 
                 override fun mouseExited(e: MouseEvent) {
+                    if (bpHover != -1) { bpHover = -1; repaint() }
                     if (hovered != -1) { hovered = -1; hoverArrowSrc = -1; hoverArrowTgt = -1; repaint(); surface.repaint() }
                 }
             }
@@ -624,7 +741,7 @@ class VirtualCodeView(
             addMouseMotionListener(mouse)
         }
 
-        private fun laneXof(lane: Int) = digitsW + segW + 5 + lane * laneStep
+        private fun laneXof(lane: Int) = markerW + segW + 5 + lane * laneStep
 
         private fun arrowAt(mx: Int, my: Int): Int {
             val arrows = branchArrows(height / lineHeight + 1)
@@ -640,15 +757,16 @@ class VirtualCodeView(
             return -1
         }
 
-        override fun getPreferredSize() = Dimension(width, 0)
+        override fun getPreferredSize() = Dimension(markerW + segW + arrowStrip, 0)
 
         override fun paintComponent(g: Graphics) {
             g.color = background
             g.fillRect(0, 0, getWidth(), height)
+            g.color = UiColors.alpha(foreground, 12)
+            g.fillRect(0, 0, markerW, height)
             g.font = codeFont
             g.enableTextAntialiasing()
             val visible = height / lineHeight + 1
-            val fm = g.fontMetrics
             for (k in 0 until visible) {
                 val index = topLine + k
                 if (index >= source.lineCount) break
@@ -659,16 +777,19 @@ class VirtualCodeView(
                 } else if (index in bookmarkLines) {
                     g.color = bookmarkColor
                     g.fillOval(2, k * lineHeight + (lineHeight - 6) / 2, 6, 6)
+                } else if (index == bpHover) {
+                    g.color = UiColors.alpha(breakpointColor, 90)
+                    g.fillOval(2, k * lineHeight + (lineHeight - 8) / 2, 8, 8)
                 }
                 if (index == debugLine) {
                     val top = k * lineHeight + lineHeight / 2 - 5
                     g.color = debugArrowColor
                     (g as Graphics2D).fillPolygon(intArrayOf(1, 8, 1), intArrayOf(top, top + 5, top + 10), 3)
                 }
-                g.color = if (index == caret.line) foreground else gutterColor
-                val label = (index + 1).toString()
-                g.drawString(label, digitsW - fm.charWidth('0') - fm.stringWidth(label), k * lineHeight + ascent)
-                if (segW > 0) segmentForLine(index)?.let { g.drawString(it, digitsW, k * lineHeight + ascent) }
+                if (segW > 0) segmentForLine(index)?.let {
+                    g.color = if (index == caret.line) foreground else gutterColor
+                    g.drawString(it, markerW, k * lineHeight + ascent)
+                }
             }
             paintBranchArrows(g as Graphics2D, visible)
         }
@@ -785,7 +906,7 @@ class VirtualCodeView(
 
     fun rerender() {
         surface.repaint()
-        gutter.repaint()
+        repaintMargins()
         graphView?.refresh()
     }
 
@@ -859,7 +980,7 @@ class VirtualCodeView(
     private fun toggleBookmark() {
         val line = caret.line
         if (bookmarks.toggle(line)) bookmarkLines.add(line) else bookmarkLines.remove(line)
-        gutter.repaint()
+        repaintMargins()
     }
 
     private fun toggleBreakpointAtCaret() { toggleBreakpoint(caret.line) }
@@ -938,7 +1059,7 @@ class VirtualCodeView(
                     KeyEvent.VK_DELETE -> {
                         toggleBreakpoint(lines[idx])
                         lines.removeAt(idx); model.remove(idx)
-                        gutter.repaint()
+                        repaintMargins()
                         if (model.isEmpty) dialog.dispose() else list.selectedIndex = idx.coerceAtMost(model.size() - 1)
                     }
                 }
@@ -949,7 +1070,10 @@ class VirtualCodeView(
 
     private fun navList(title: String, entries: List<Pair<String, () -> Unit>>) {
         if (entries.isEmpty()) { JOptionPane.showMessageDialog(this, "Nothing to show", title, JOptionPane.INFORMATION_MESSAGE); return }
-        val filter = javax.swing.JTextField()
+        val filter = javax.swing.JTextField().apply {
+            putClientProperty("JTextField.placeholderText", "Filter…")
+            putClientProperty("JTextField.showClearButton", true)
+        }
         val model = javax.swing.DefaultListModel<String>()
         val shown = ArrayList<Int>()
         fun refilter() {
@@ -1078,7 +1202,10 @@ class VirtualCodeView(
     private fun findAction() {
         val actions = viewActions()
         val dialog = javax.swing.JDialog(javax.swing.SwingUtilities.getWindowAncestor(this), "Find Action", java.awt.Dialog.ModalityType.MODELESS)
-        val field = JTextField()
+        val field = JTextField().apply {
+            putClientProperty("JTextField.placeholderText", "Type to filter actions…")
+            putClientProperty("JTextField.showClearButton", true)
+        }
         val model = javax.swing.DefaultListModel<String>()
         val list = JList(model).apply { selectionMode = ListSelectionModel.SINGLE_SELECTION }
         fun refresh() {
@@ -1278,6 +1405,40 @@ class VirtualCodeView(
             addActionListener { action() }
         }
 
+    enum class CodeAction(val label: String) {
+        FIND("Find…"), FIND_ACTION("Find Action…"), GOTO_ADDRESS("Go to Address…"),
+        GOTO_SYMBOL("Go to Symbol…"), GOTO_MAIN("Go to Main Activity"),
+        SEGMENTS("Segments…"), STRINGS("Strings…"), EXPORTS("Exports…"),
+        IMPORTS("Imports…"), CONSTRUCTORS("Constructors…"),
+        BREAKPOINTS("Breakpoints…"), BOOKMARKS("Bookmarks…"),
+    }
+
+    fun applies(a: CodeAction): Boolean = when (a) {
+        CodeAction.FIND, CodeAction.FIND_ACTION, CodeAction.GOTO_ADDRESS, CodeAction.BOOKMARKS -> true
+        CodeAction.GOTO_SYMBOL, CodeAction.SEGMENTS, CodeAction.STRINGS, CodeAction.EXPORTS, CodeAction.IMPORTS, CodeAction.CONSTRUCTORS -> isAsm
+        CodeAction.GOTO_MAIN, CodeAction.BREAKPOINTS -> !isAsm
+    }
+
+    fun canDo(a: CodeAction): Boolean = when (a) {
+        CodeAction.EXPORTS, CodeAction.IMPORTS, CodeAction.CONSTRUCTORS -> isAsm && nativeInfo != null
+        else -> applies(a)
+    }
+
+    fun perform(a: CodeAction): Unit = when (a) {
+        CodeAction.FIND -> openSearch()
+        CodeAction.FIND_ACTION -> findAction()
+        CodeAction.GOTO_ADDRESS -> goToAddress()
+        CodeAction.GOTO_SYMBOL -> gotoSymbol()
+        CodeAction.GOTO_MAIN -> goToMainActivity()
+        CodeAction.SEGMENTS -> showSegments()
+        CodeAction.STRINGS -> showStrings()
+        CodeAction.EXPORTS -> showExports()
+        CodeAction.IMPORTS -> showImports()
+        CodeAction.CONSTRUCTORS -> showConstructors()
+        CodeAction.BREAKPOINTS -> showBreakpoints()
+        CodeAction.BOOKMARKS -> showBookmarks()
+    }
+
     private fun showMenu(e: MouseEvent) {
         val symbol = symbolAtCaret()
         val shortcut = Toolkit.getDefaultToolkit().menuShortcutKeyMaskEx
@@ -1290,36 +1451,26 @@ class VirtualCodeView(
                 add(menuItem("Select Method/Class", 'A'.code, shortcut) { selectEnclosing() })
                 add(menuItem("Copy Method", 'C'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK, enabled = currentMethod() != null) { copyMethod() })
             }
+            addSeparator()
             val graphEnabled = if (isAsm) source.sectionAt(caret.line) != null else currentMethod() != null
             add(menuItem("Graph View", KeyEvent.VK_SPACE, 0, enabled = graphEnabled) { showGraph() })
             if (isAsm) add(menuItem("Pseudo-C", KeyEvent.VK_TAB, 0, enabled = source.sectionAt(caret.line) != null) { showPseudo() })
             addSeparator()
-            add(menuItem("Find…", 'F'.code, shortcut) { openSearch() })
             val usagesEnabled = if (isAsm) wordAt(lineText(caret.line), caret.col) != null else symbol != null
             add(menuItem("Find Usages", KeyEvent.VK_X, 0, enabled = usagesEnabled) { findUsages() })
             add(menuItem("Go to Definition", KeyEvent.VK_ENTER, 0, enabled = isAsm || symbol != null) { goToDefinition() })
             add(menuItem("Go to Branch Target", enabled = (branchTarget(rawLineText(caret.line))?.get(1) ?: -1) >= 0) { gotoBranchTarget() })
-            add(menuItem("Go to Address…", 'G'.code, shortcut) { goToAddress() })
-            if (!isAsm) add(menuItem("Go to Main Activity") { goToMainActivity() })
             addSeparator()
             add(menuItem("Toggle Breakpoint", KeyEvent.VK_F9, 0, enabled = breakpointableAt(caret.line)) { toggleBreakpointAtCaret() })
             add(menuItem("Run to Cursor", KeyEvent.VK_F4, 0, enabled = breakpointableAt(caret.line)) { runToCursorAtCaret() })
-            if (!isAsm) add(menuItem("Show Breakpoints…", KeyEvent.VK_F9, KeyEvent.SHIFT_DOWN_MASK) { showBreakpoints() })
             add(menuItem("Toggle Bookmark", 'B'.code, shortcut) { toggleBookmark() })
-            add(menuItem("Show Bookmarks…") { showBookmarks() })
             if (isAsm) {
-                add(menuItem("Go to Symbol…", 'L'.code, shortcut) { gotoSymbol() })
-                add(menuItem("Segments…", 'L'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK) { showSegments() })
-                add(menuItem("Strings…", 'S'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK) { showStrings() })
                 add(menuItem("View Operand in Memory", enabled = memOperandAtCaret() != null) { memOperandAtCaret()?.let { onViewMemoryNative?.invoke(it) } })
                 if (nativeEnableVisible()) add(menuItem("Enable native debugging") { onEnableNative?.invoke() })
+                addSeparator()
                 add(menuItem("Patch (assemble)…", enabled = breakpointableAt(caret.line) && nativePatchEnabled()) { patchAtCaret() })
-                if (nativeInfo != null) {
-                    add(menuItem("Exports…") { showExports() })
-                    add(menuItem("Imports…") { showImports() })
-                    add(menuItem("Constructors…") { showConstructors() })
-                }
             }
+            addSeparator()
             add(menuItem("Add / Edit Comment", KeyEvent.VK_SLASH, 0, enabled = anchorOf(rawLineText(caret.line), caret.line) != null) { addComment() })
             if (!isAsm) {
                 add(menuItem("Rename…", KeyEvent.VK_N, 0, enabled = symbol?.renameKey != null && renames.active) { renameSymbol() })
@@ -1327,9 +1478,10 @@ class VirtualCodeView(
                 val canRename = renames.active && wordAt(lineText(caret.line), caret.col)?.let { isRenameableNative(it) } == true
                 add(menuItem("Rename…", KeyEvent.VK_N, 0, enabled = canRename) { renameSymbol() })
             }
-            addSeparator()
-            add(menuItem("Find Action…", 'A'.code, shortcut or KeyEvent.SHIFT_DOWN_MASK) { findAction() })
-            if (!isAsm) add(menuItem("Decompile to Java", KeyEvent.VK_TAB, 0) { decompile() })
+            if (!isAsm) {
+                addSeparator()
+                add(menuItem("Decompile to Java", KeyEvent.VK_TAB, 0) { decompile() })
+            }
         }.show(surface, e.x, e.y)
     }
 
@@ -1339,7 +1491,7 @@ class VirtualCodeView(
         caret = Pos(end, lineText(end).length)
         ensureCaretVisible()
         surface.repaint()
-        gutter.repaint()
+        repaintMargins()
     }
 
     private fun enclosingMethod(line: Int): Pair<Int, Int>? {
@@ -1547,7 +1699,7 @@ class VirtualCodeView(
         val token = "%08x:".format(vaddr)
         background {
             val line = source.search(token, 0, true, false)
-            SwingUtilities.invokeLater { if (line != null) { debugLine = line; goToLine(line); gutter.repaint() } }
+            SwingUtilities.invokeLater { if (line != null) { debugLine = line; goToLine(line); repaintMargins() } }
         }
     }
 
@@ -1782,7 +1934,7 @@ class VirtualCodeView(
             }
             val target = found
             SwingUtilities.invokeLater {
-                if (target != null) { debugLine = target; goToLine(target); gutter.repaint() }
+                if (target != null) { debugLine = target; goToLine(target); repaintMargins() }
                 else revealMethod(fullName, shortId)
             }
         }
@@ -1794,7 +1946,7 @@ class VirtualCodeView(
         debugPopupText = null
         hideDebugPopup()
         surface.repaint()
-        gutter.repaint()
+        repaintMargins()
     }
 
     fun setDebugInlineValues(values: Map<String, String>?) {
@@ -1835,11 +1987,24 @@ class VirtualCodeView(
     fun setBreakpointLines(lines: Collection<Int>) {
         breakpointLines.clear()
         breakpointLines.addAll(lines)
-        gutter.repaint()
+        repaintMargins()
     }
 
     fun markNativeBreakpoints(vaddrs: Collection<Long>) {
-        nativeBreakpoints.clear(); nativeBreakpoints.addAll(vaddrs); repaint()
+        nativeBreakpoints.clear(); nativeBreakpoints.addAll(vaddrs)
+        if (vaddrs.isEmpty()) { nativeBreakpointLines.clear(); repaintMargins(); return }
+        background {
+            val set = vaddrs.toHashSet()
+            val lines = HashSet<Int>()
+            var i = 0
+            while (i < source.lineCount) {
+                val batch = source.lines(i, 4096)
+                if (batch.isEmpty()) break
+                batch.forEachIndexed { k, t -> parseAsmVaddr(t.trimStart())?.let { if (it in set) lines.add(i + k) } }
+                i += batch.size
+            }
+            SwingUtilities.invokeLater { nativeBreakpointLines.clear(); nativeBreakpointLines.addAll(lines); repaintMargins() }
+        }
     }
 
     fun nativeBreakpointSet(): Set<Long> = nativeBreakpoints.toSet()
@@ -1871,15 +2036,16 @@ class VirtualCodeView(
         if (isAsm) {
             val vaddr = parseAsmVaddr(rawLineText(line).trimStart()) ?: return false
             val added = nativeBreakpoints.add(vaddr).also { if (!it) nativeBreakpoints.remove(vaddr) }
+            if (added) nativeBreakpointLines.add(line) else nativeBreakpointLines.remove(line)
             onToggleNativeBreakpoint?.invoke(vaddr, added)
-            repaint()
+            repaintMargins()
             return true
         }
         val descriptor = methodKeyAt(line) ?: return false
         val dexPc = source.dexPcAt(line) ?: return false
         val added = breakpointLines.add(line)
         if (!added) breakpointLines.remove(line)
-        gutter.repaint()
+        repaintMargins()
         onToggleBreakpoint?.invoke(descriptor, dexPc, added)
         return true
     }
@@ -1904,7 +2070,10 @@ class VirtualCodeView(
         javax.swing.JDialog(owner, "Find in Bytecode", java.awt.Dialog.ModalityType.MODELESS) {
 
         private val page = 200
-        val field = JTextField(28)
+        val field = JTextField(28).apply {
+            putClientProperty("JTextField.placeholderText", "Search…")
+            putClientProperty("JTextField.showClearButton", true)
+        }
         private val caseCheck = javax.swing.JCheckBox("Case sensitive")
         private val status = JLabel(" ")
         private val model = javax.swing.DefaultListModel<String>()
@@ -1951,6 +2120,7 @@ class VirtualCodeView(
         private fun newSearch() {
             if (field.text.isEmpty()) return
             hits.clear()
+            searchHitLines.clear()
             model.clear()
             list.clearSelection()
             fetch(0, page)
@@ -1966,7 +2136,8 @@ class VirtualCodeView(
                 val found = source.findFrom(query, fromLine, limit, ignoreCase) { i, t -> displayLine(i, t) }
                 SwingUtilities.invokeLater {
                     val first = hits.isEmpty()
-                    found.forEach { hits.add(it); model.addElement("${it + 1}:  ${displayLine(it, source.lines(it, 1).firstOrNull() ?: "").trim()}") }
+                    found.forEach { hits.add(it); searchHitLines.add(it); model.addElement("${it + 1}:  ${displayLine(it, source.lines(it, 1).firstOrNull() ?: "").trim()}") }
+                    repaintMargins()
                     complete = found.size < limit
                     loadMore.isEnabled = !complete
                     loadAll.isEnabled = !complete

@@ -33,6 +33,7 @@ import io.github.nitanmarcel.jdex.disasm.JniName
 import io.github.nitanmarcel.jdex.disasm.KeystoneAssembler
 import io.github.nitanmarcel.jdex.project.ApkSession
 import io.github.nitanmarcel.jdex.project.BinaryContent
+import io.github.nitanmarcel.jdex.project.SyncTarget
 import io.github.nitanmarcel.jdex.project.CodeContent
 import io.github.nitanmarcel.jdex.project.Content
 import io.github.nitanmarcel.jdex.project.NativeContent
@@ -98,6 +99,8 @@ class MainWindow : JFrame("jdex") {
     private var syncState = FlatTriStateCheckBox.State.UNSELECTED
     private var bytecodeTab: EditorTab? = null
     private var bytecodeView: VirtualCodeView? = null
+    private var activeCodeView: VirtualCodeView? = null
+    private val codeActionItems = ArrayList<Pair<JMenuItem, VirtualCodeView.CodeAction>>()
     private var dexBytecodeTab: EditorTab? = null
     private var dexBytecodeView: VirtualCodeView? = null
     private var hierarchyClasses: List<io.github.nitanmarcel.jdex.project.HClass> = emptyList()
@@ -109,6 +112,7 @@ class MainWindow : JFrame("jdex") {
     private val nativeArch = HashMap<String, io.github.nitanmarcel.jdex.disasm.ElfArch>()
     private lateinit var scripting: ScriptPanel
     private lateinit var debugBar: DebugToolBar
+    private val statusBar = StatusBar()
     private lateinit var debugViews: DebugViews
     @Volatile private var debugSession: DebugSession? = null
     private var attaching = false
@@ -201,6 +205,7 @@ class MainWindow : JFrame("jdex") {
             }
         })
 
+        rootPane.putClientProperty("JRootPane.titleBarShowTitle", false)
         Docking.initialize(this)
         debugBar = DebugToolBar(
             onAttach = { dev, proc -> attachDebugger(dev, proc) },
@@ -214,8 +219,8 @@ class MainWindow : JFrame("jdex") {
             packageHint = { session?.appPackage },
             log = { log.warning(it) },
         )
-        add(debugBar, java.awt.BorderLayout.NORTH)
         add(RootDockingPanel(this))
+        add(statusBar, java.awt.BorderLayout.SOUTH)
         debugViews = DebugViews(
             onFrameSelected = { _, location, vars -> revealDebugLocation(location); updateInlineValues(location, vars) },
             onSetValue = { key, text -> debugSession?.setValue(key, text) ?: false },
@@ -289,6 +294,27 @@ class MainWindow : JFrame("jdex") {
         if (Docking.isDocked(logger)) Docking.bringToFront(logger)
     }
 
+    private fun codeItem(action: VirtualCodeView.CodeAction): JMenuItem {
+        val item = JMenuItem(action.label)
+        item.addActionListener { activeCodeView?.takeIf { it.isShowing }?.perform(action) }
+        codeActionItems.add(item to action)
+        return item
+    }
+
+    private fun refreshCodeActions() {
+        val v = activeCodeView?.takeIf { it.isShowing }
+        codeActionItems.forEach { (item, action) ->
+            item.isVisible = v == null || v.applies(action)
+            item.isEnabled = v != null && v.canDo(action)
+        }
+    }
+
+    private fun JMenu.onOpen(block: () -> Unit) = addMenuListener(object : javax.swing.event.MenuListener {
+        override fun menuSelected(e: javax.swing.event.MenuEvent) = block()
+        override fun menuDeselected(e: javax.swing.event.MenuEvent) {}
+        override fun menuCanceled(e: javax.swing.event.MenuEvent) {}
+    })
+
     private fun createMenuBar(editors: EditorAnchor, explorer: FilesPanel, hierarchy: HierarchyPanel, logger: LoggerPanel, scripting: ScriptPanel) = JMenuBar().apply {
         add(JMenu("File").apply {
             add(JMenuItem("Open…").apply {
@@ -319,6 +345,19 @@ class MainWindow : JFrame("jdex") {
                 }
             })
         })
+        add(JMenu("Search").apply {
+            add(codeItem(VirtualCodeView.CodeAction.FIND))
+            add(codeItem(VirtualCodeView.CodeAction.FIND_ACTION))
+            onOpen { refreshCodeActions() }
+        })
+        add(JMenu("Navigate").apply {
+            add(codeItem(VirtualCodeView.CodeAction.GOTO_ADDRESS))
+            add(codeItem(VirtualCodeView.CodeAction.GOTO_SYMBOL))
+            add(codeItem(VirtualCodeView.CodeAction.GOTO_MAIN))
+            addSeparator()
+            add(codeItem(VirtualCodeView.CodeAction.BOOKMARKS))
+            onOpen { refreshCodeActions() }
+        })
         add(JMenu("View").apply {
             add(viewItem("Project Explorer", explorer) {
                 Docking.dock(explorer, this@MainWindow, DockingRegion.WEST, 0.2)
@@ -338,23 +377,52 @@ class MainWindow : JFrame("jdex") {
                 if (Docking.isDocked(logger)) Docking.dock(scripting, logger, DockingRegion.CENTER)
                 else Docking.dock(scripting, this@MainWindow, DockingRegion.SOUTH, 0.25)
             })
-            add(JMenu("Debugger").apply {
-                add(viewItem("Threads", debugViews.threads) { dockDebugView(debugViews.threads) })
-                add(viewItem("Call Stack", debugViews.frames) { dockDebugView(debugViews.frames) })
-                add(viewItem("Variables", debugViews.variables) { dockDebugView(debugViews.variables) })
-                add(viewItem("Libraries", debugViews.libraries) { dockDebugView(debugViews.libraries) })
-                add(viewItem("Memory", debugViews.memory) { dockDebugView(debugViews.memory) })
-            })
+            val subviews = JMenu("Subviews").apply {
+                add(codeItem(VirtualCodeView.CodeAction.SEGMENTS))
+                add(codeItem(VirtualCodeView.CodeAction.STRINGS))
+                addSeparator()
+                add(codeItem(VirtualCodeView.CodeAction.EXPORTS))
+                add(codeItem(VirtualCodeView.CodeAction.IMPORTS))
+                add(codeItem(VirtualCodeView.CodeAction.CONSTRUCTORS))
+            }
+            addSeparator()
+            add(subviews)
+            onOpen {
+                refreshCodeActions()
+                val v = activeCodeView?.takeIf { it.isShowing }
+                subviews.isVisible = v == null || v.applies(VirtualCodeView.CodeAction.SEGMENTS)
+            }
+        })
+        add(JMenu("Debug").apply {
+            add(viewItem("Threads", debugViews.threads) { dockDebugView(debugViews.threads) })
+            add(viewItem("Call Stack", debugViews.frames) { dockDebugView(debugViews.frames) })
+            add(viewItem("Variables", debugViews.variables) { dockDebugView(debugViews.variables) })
+            add(viewItem("Libraries", debugViews.libraries) { dockDebugView(debugViews.libraries) })
+            add(viewItem("Memory", debugViews.memory) { dockDebugView(debugViews.memory) })
+            val bpSep = javax.swing.JPopupMenu.Separator()
+            add(bpSep)
+            add(codeItem(VirtualCodeView.CodeAction.BREAKPOINTS))
+            addSeparator()
+            add(JMenuItem("Debugger Settings…").apply { addActionListener { DebugConfigDialog.show(this@MainWindow, "", true) } })
+            onOpen {
+                refreshCodeActions()
+                val v = activeCodeView?.takeIf { it.isShowing }
+                bpSep.isVisible = v == null || v.applies(VirtualCodeView.CodeAction.BREAKPOINTS)
+            }
         })
         add(JMenu("Appearance").apply {
             add(JMenu("Theme").apply {
                 val group = ButtonGroup()
-                Themes.all.forEach { def ->
-                    add(JRadioButtonMenuItem(def.label, def.id == Themes.currentId).also {
-                        group.add(it)
-                        it.addActionListener { Themes.select(def.id) }
-                    })
+                fun fill(menu: JMenu, defs: List<Themes.Def>) {
+                    defs.sortedBy { it.label.lowercase() }.forEach { def ->
+                        menu.add(JRadioButtonMenuItem(def.label, def.id == Themes.currentId).also {
+                            group.add(it)
+                            it.addActionListener { Themes.select(def.id) }
+                        })
+                    }
                 }
+                add(JMenu("Light").apply { fill(this, Themes.all.filter { !it.dark }) })
+                add(JMenu("Dark").apply { fill(this, Themes.all.filter { it.dark }) })
             })
             addSeparator()
             add(JMenuItem("Theme Editor…").apply { icon = Icons.SETTINGS; addActionListener { ThemeEditor.open(this@MainWindow) } })
@@ -362,20 +430,49 @@ class MainWindow : JFrame("jdex") {
         add(JMenu("Help").apply {
             add(JMenuItem("About jdex…").apply { addActionListener { showAbout() } })
         })
+        add(javax.swing.Box.createHorizontalStrut(24))
+        add(debugBar)
     }
 
     private fun showAbout() {
-        val msg = """
-            <html><body style='width:360px'>
-            <h2 style='margin:0'>jdex</h2>
-            <p>Android APK/DEX reverse-engineering tool.</p>
-            <p>Built with jadx, FlatLaf, GraalPy, RSyntaxTextArea and Modern Docking.</p>
-            <p>Icons: <b>VS Code Codicons</b> &copy; Microsoft Corporation, licensed under
-            CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/).</p>
-            <p style='color:gray'>Java ${System.getProperty("java.version")}</p>
-            </body></html>
-        """.trimIndent()
-        JOptionPane.showMessageDialog(this, msg, "About jdex", JOptionPane.INFORMATION_MESSAGE)
+        val text = buildString {
+            appendLine("Apk disassembler and decompiler")
+            appendLine("https://github.com/jdexorg/jdex")
+            appendLine("Licensed under the GNU General Public License v2")
+            appendLine()
+            appendLine("Third-party software used by jdex:")
+            appendLine()
+            appendLine("Libraries")
+            appendLine("- jadx, jadx jdwp (Apache License 2.0)")
+            appendLine("- FlatLaf (Apache License 2.0)")
+            appendLine("- RSyntaxTextArea (modified BSD, BSD-3-Clause)")
+            appendLine("- Modern Docking (MIT License)")
+            appendLine("- MigLayout (BSD License)")
+            appendLine("- BinEd, binary_data (Apache License 2.0)")
+            appendLine("- GraalPy / GraalVM (Universal Permissive License 1.0)")
+            appendLine("- JNA (Apache License 2.0 or LGPL 2.1)")
+            appendLine("- Android apksig, ddmlib (Apache License 2.0)")
+            appendLine("- SQLite JDBC (Apache License 2.0)")
+            appendLine("- kotlinx.coroutines, Kotlin stdlib (Apache License 2.0)")
+            appendLine()
+            appendLine("Native")
+            appendLine("- Capstone (BSD-3-Clause)")
+            appendLine("- Keystone (GPL v2)")
+            appendLine()
+            appendLine("Fonts & icons")
+            appendLine("- Inter, JetBrains Mono (SIL Open Font License 1.1)")
+            appendLine("- VS Code Codicons (CC BY 4.0, (c) Microsoft Corporation)")
+            appendLine()
+            append("Java ${System.getProperty("java.version")}")
+        }
+        val area = javax.swing.JTextArea(text).apply {
+            isEditable = false
+            caretPosition = 0
+            border = null
+            background = javax.swing.UIManager.getColor("Panel.background")
+        }
+        val scroll = javax.swing.JScrollPane(area).apply { preferredSize = java.awt.Dimension(460, 320) }
+        JOptionPane.showMessageDialog(this, scroll, "About jdex", JOptionPane.INFORMATION_MESSAGE)
     }
 
     private fun viewItem(text: String, dockable: Dockable, dock: () -> Unit) =
@@ -588,7 +685,7 @@ class MainWindow : JFrame("jdex") {
     private fun openView(id: String, title: String, load: () -> Content) {
         val tabId = "editor:$id"
         openTabs[tabId]?.let { tab ->
-            if (Docking.isDocked(tab)) Docking.bringToFront(tab) else Docking.dock(tab, "editors", DockingRegion.CENTER)
+            if (Docking.isDocked(tab)) Docking.bringToFront(tab) else dockEditorTab(tab)
             return
         }
         scope.launch {
@@ -599,9 +696,9 @@ class MainWindow : JFrame("jdex") {
                 is CodeContent -> openCode(tabId, title, content)
                 is NativeContent -> openNative(tabId, title, content)
                 else -> {
-                    val tab = EditorTab(tabId, title, Editors.component(content))
+                    val tab = EditorTab(tabId, title, Editors.component(content), icon = Icons.of("file"))
                     openTabs[tabId] = tab
-                    Docking.dock(tab, "editors", DockingRegion.CENTER)
+                    dockEditorTab(tab)
                 }
             }
         }
@@ -618,7 +715,7 @@ class MainWindow : JFrame("jdex") {
             add(north, java.awt.BorderLayout.NORTH)
             add(pane, java.awt.BorderLayout.CENTER)
         } else pane
-        val tab = EditorTab("pseudo", title, content)
+        val tab = EditorTab("pseudo", title, content, icon = Icons.of("file-code"))
         pseudoTab = tab
         val target = bytecodeTab
         if (target != null && Docking.isDocked(target)) Docking.dock(tab, target, DockingRegion.EAST, 0.5)
@@ -645,9 +742,9 @@ class MainWindow : JFrame("jdex") {
     private fun openNative(tabId: String, title: String, content: NativeContent) {
         val elf = io.github.nitanmarcel.jdex.disasm.ElfFile.parse(content.bytes)
         if (elf == null) {
-            val tab = EditorTab(tabId, title, Editors.component(BinaryContent(content.bytes)))
+            val tab = EditorTab(tabId, title, Editors.component(BinaryContent(content.bytes)), icon = Icons.of("file-binary"))
             openTabs[tabId] = tab
-            Docking.dock(tab, "editors", DockingRegion.CENTER)
+            dockEditorTab(tab)
             return
         }
         val choice = DisassemblerDialog.show(this, content.name, elf) ?: return
@@ -707,22 +804,23 @@ class MainWindow : JFrame("jdex") {
         summary.add("Entry point : 0x${elf.entry.toString(16)}")
         summary.add("Symbols     : ${if (stripped) "stripped (.dynsym only)" else "present (.symtab)"}   Stack canary: ${if (canary) "yes" else "no"}")
         summary.add("Counts      : ${exports.size} functions, ${imports.size} imports, ${constructors.size} constructors")
-        return io.github.nitanmarcel.jdex.project.NativeInfo(exports, imports, constructors, summary)
+        val archLabel = "ELF${if (elf.is64) "64" else "32"} · ${arch.name} · ${if (little) "LE" else "BE"}"
+        return io.github.nitanmarcel.jdex.project.NativeInfo(exports, imports, constructors, summary, archLabel)
     }
 
     private fun openCode(tabId: String, title: String, content: CodeContent) {
         val cancelled = AtomicBoolean(false)
         val label = if (content.syntax == Syntax.ASM) "Disassembling" else "Generating bytecode"
         val unit = if (content.syntax == Syntax.ASM) "bytes" else "classes"
-        val dialog = LoadingDialog(this, label, unit, onCancel = { cancelled.set(true) })
+        statusBar.startProgress(label) { cancelled.set(true) }
         Thread({
             val result = runCatching {
-                content.generate({ current, total -> SwingUtilities.invokeLater { dialog.progress(current, total) } }, cancelled::get)
+                content.generate({ current, total -> SwingUtilities.invokeLater { statusBar.setProgress(current, total, unit) } }, cancelled::get)
             }
             result.exceptionOrNull()?.let { if (it !is io.github.nitanmarcel.jdex.project.GenerationCancelled) log.log(Level.WARNING, "Generation failed", it) }
             val source = result.getOrNull()
             SwingUtilities.invokeLater {
-                dialog.dispose()
+                statusBar.stopProgress()
                 if (source != null && !cancelled.get()) {
                     val view = VirtualCodeView(
                         source,
@@ -740,6 +838,7 @@ class MainWindow : JFrame("jdex") {
                         renames = renames,
                         onRenamed = { renamesChanged() },
                         onCaret = { target -> javaModes?.followTo(target) },
+                        onPosition = { statusBar.setPosition(it) },
                         cfgProvider = { raw, shortId -> session?.methodCfg(raw, shortId) },
                         onText = { title, text, syntax, north -> openText(title, text, syntax, north) },
                         onNativeJump = { cls, method, sig -> jumpToNativeExport(cls, method, sig) },
@@ -747,7 +846,7 @@ class MainWindow : JFrame("jdex") {
                         onNativeExportRename = { symbol, jniName, jniSig, name -> propagateExportRename(symbol, jniName, jniSig, name) },
                         onActivated = { v -> onViewActivated(v) },
                     )
-                    val tab = EditorTab(tabId, title, view, source)
+                    val tab = EditorTab(tabId, title, view, source, Icons.of(if (content.syntax == Syntax.ASM) "file-binary" else "file-code"))
                     openTabs[tabId] = tab
                     if (content.syntax == Syntax.ASM) {
                         nativeViews.add(Triple(tab, view, source))
@@ -779,7 +878,7 @@ class MainWindow : JFrame("jdex") {
                         view.markBreakpoints(breakpointStore().breakpoints().map { it.descriptor to it.dexPc })
                     }
                     view.syncApprox = syncState == FlatTriStateCheckBox.State.INDETERMINATE
-                    Docking.dock(tab, "editors", DockingRegion.CENTER)
+                    dockEditorTab(tab)
                     log.info("Opened ${if (content.syntax == Syntax.ASM) "disassembly" else "bytecode"} (${source.lineCount} lines)")
                 } else {
                     source?.close()
@@ -787,7 +886,6 @@ class MainWindow : JFrame("jdex") {
                 }
             }
         }, "bytecode-gen").apply { isDaemon = true }.start()
-        dialog.isVisible = true
     }
 
     private fun clearEditors() {
@@ -894,6 +992,8 @@ class MainWindow : JFrame("jdex") {
     }
 
     private fun onViewActivated(view: VirtualCodeView) {
+        activeCodeView = view
+        if (debugSession == null) view.binaryArch?.let { statusBar.setArch(it) }
         if (view.isNativeView) {
             if (hierarchyNativeView === view) return
             hierarchyNativeView = view
@@ -942,6 +1042,14 @@ class MainWindow : JFrame("jdex") {
         }
     }
 
+    private fun dockEditorTab(tab: EditorTab) {
+        val leader = (sequenceOf(dexBytecodeTab) + nativeViews.asSequence().map { it.first } + openTabs.values.asSequence())
+            .filterNotNull()
+            .firstOrNull { it !== tab && it !== javaTab && it !== pseudoTab && Docking.isDocked(it) }
+        if (leader != null) Docking.dock(tab, leader, DockingRegion.CENTER)
+        else Docking.dock(tab, "editors", DockingRegion.CENTER)
+    }
+
     private fun navigateBytecode(action: (VirtualCodeView) -> Unit) {
         val tab = bytecodeTab ?: return
         val view = bytecodeView ?: return
@@ -960,9 +1068,12 @@ class MainWindow : JFrame("jdex") {
                 SwingUtilities.invokeLater { attaching = false; log.warning("Attach failed: ${e.message}") }
                 return@Thread
             }
+            val abi = runCatching { DeviceBridge.deviceAbi(dev.serial) }.getOrNull()
             SwingUtilities.invokeLater {
                 attaching = false
                 attachedDevice = dev; attachedProc = proc
+                statusBar.setTarget("${proc.name}  ·  pid ${proc.pid}  ·  ${dev.serial}")
+                statusBar.setArch(abi ?: "")
                 debugSession = s
                 s.onStateChange { st -> SwingUtilities.invokeLater { onDebugState(st) } }
                 dexBps.forEach { s.addBreakpoint(it) }
@@ -990,7 +1101,8 @@ class MainWindow : JFrame("jdex") {
             DeviceBridge.useJrunas(null)
             val devAbi = DeviceBridge.deviceAbi(dev.serial)
             val picked = arrayOfNulls<NativeDebug>(1)
-            runCatching { SwingUtilities.invokeAndWait { picked[0] = DebugConfigDialog.show(this@MainWindow, devAbi) } }
+            picked[0] = if (DebugConfigDialog.remembered()) DebugConfigDialog.build(devAbi) else null
+            if (picked[0] == null) runCatching { SwingUtilities.invokeAndWait { picked[0] = DebugConfigDialog.show(this@MainWindow, devAbi) } }
             val nativeDebug = picked[0] ?: run { SwingUtilities.invokeLater { enablingNative = false; log.info("Native debugging cancelled") }; return@Thread }
             if (nativeDebug is NativeDebug.Managed && !runCatching { DeviceBridge.isDebuggable(dev.serial, proc.name) }.getOrDefault(true) && !setUpRootDebug(dev, proc.name)) {
                 SwingUtilities.invokeLater { enablingNative = false }; return@Thread
@@ -1069,6 +1181,16 @@ class MainWindow : JFrame("jdex") {
         else Docking.dock(d, this, DockingRegion.EAST, 0.28)
     }
 
+    private fun describeTarget(t: SyncTarget): String = when (t) {
+        is SyncTarget.Line -> "${methodLabel(t.methodId)}  ·  line ${t.sourceLine}"
+        is SyncTarget.MethodDecl -> methodLabel(t.methodId)
+        is SyncTarget.ClassDecl -> t.rawName.substringAfterLast('.').substringAfterLast('/')
+        is SyncTarget.FieldDecl -> "${t.rawName.substringAfterLast('.').substringAfterLast('/')}  ·  ${t.fieldName}"
+    }
+
+    private fun methodLabel(id: String): String =
+        if ("->" in id) id.substringAfter("->") else id.substringAfterLast('.').substringAfterLast('/')
+
     private fun onDebugState(state: DebugState) {
         debugBar.setState(state)
         when (state) {
@@ -1089,6 +1211,7 @@ class MainWindow : JFrame("jdex") {
                 nativeViewByBase.values.forEach { it.second.clearDebugLine() }
             }
             DebugState.Detached -> {
+                statusBar.setTarget(""); statusBar.setArch("")
                 debugSession = null
                 debugViews.clear()
                 dexBytecodeView?.clearDebugLine()
@@ -1283,7 +1406,7 @@ class MainWindow : JFrame("jdex") {
                     onResult(result)
                 }
             },
-            onCaret = { target -> bytecodeView?.followFromJava(target) },
+            onCaret = { target -> bytecodeView?.followFromJava(target); statusBar.setPosition(describeTarget(target)) },
             syncState = syncState,
             onSyncToggle = { state ->
                 syncState = state
@@ -1291,7 +1414,7 @@ class MainWindow : JFrame("jdex") {
                 if (state == FlatTriStateCheckBox.State.UNSELECTED) bytecodeView?.clearSyncHighlight()
             },
         )
-        val tab = EditorTab("decompiled", className.substringAfterLast('.'), view)
+        val tab = EditorTab("decompiled", className.substringAfterLast('.'), view, icon = Icons.of("file-code"))
         javaTab = tab
         javaModes = view
         val target = bytecodeTab

@@ -42,8 +42,9 @@ object RootDebugDialog {
         dialog.contentPane.add(text, BorderLayout.CENTER)
         dialog.contentPane.add(JPanel(BorderLayout()).apply {
             add(JPanel(FlowLayout(FlowLayout.LEFT)).apply { add(dontShow) }, BorderLayout.WEST)
-            add(JPanel(FlowLayout(FlowLayout.RIGHT)).apply { add(ok); add(cancel) }, BorderLayout.EAST)
+            add(JPanel(FlowLayout(FlowLayout.RIGHT)).apply { add(cancel); add(ok) }, BorderLayout.EAST)
         }, BorderLayout.SOUTH)
+        dialog.rootPane.defaultButton = ok
         dialog.pack()
         dialog.setLocationRelativeTo(owner)
         dialog.isVisible = true

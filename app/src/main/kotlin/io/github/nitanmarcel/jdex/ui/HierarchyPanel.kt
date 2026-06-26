@@ -60,12 +60,6 @@ class HierarchyPanel(
             }
         }
         tree.addMouseListener(object : MouseAdapter() {
-            override fun mouseClicked(e: MouseEvent) {
-                if (e.clickCount != 2) return
-                ((tree.getPathForLocation(e.x, e.y)?.lastPathComponent as? DefaultMutableTreeNode)?.userObject as? HClass)
-                    ?.let { onDecompile(it.rawName) }
-            }
-
             override fun mousePressed(e: MouseEvent) = popup(e)
             override fun mouseReleased(e: MouseEvent) = popup(e)
 
@@ -74,11 +68,12 @@ class HierarchyPanel(
                 val path = tree.getPathForLocation(e.x, e.y) ?: return
                 tree.selectionPath = path
                 val obj = (path.lastPathComponent as? DefaultMutableTreeNode)?.userObject
+                val menu = JPopupMenu()
+                if (obj is HClass) menu.add(JMenuItem("Decompile to Java").apply { addActionListener { onDecompile(obj.rawName) } })
                 if (renames.active && (obj is HClass || obj is HMethod || obj is HField)) {
-                    JPopupMenu().apply {
-                        add(JMenuItem("Rename…").apply { addActionListener { renameNode(obj) } })
-                    }.show(tree, e.x, e.y)
+                    menu.add(JMenuItem("Rename…").apply { addActionListener { renameNode(obj) } })
                 }
+                if (menu.componentCount > 0) menu.show(tree, e.x, e.y)
             }
         })
     }

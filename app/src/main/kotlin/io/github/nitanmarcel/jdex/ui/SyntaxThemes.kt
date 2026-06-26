@@ -83,11 +83,20 @@ object SyntaxThemes {
         get() = prefs.getInt("font.size", 13)
         set(value) = prefs.putInt("font.size", value)
 
+    private val monoFamily: String by lazy {
+        val jb = com.formdev.flatlaf.fonts.jetbrains_mono.FlatJetBrainsMonoFont.FAMILY
+        if (jb in java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().availableFontFamilyNames) jb else java.awt.Font.MONOSPACED
+    }
+
     fun editorFont(): java.awt.Font =
-        java.awt.Font(editorFontFamily ?: java.awt.Font.MONOSPACED, java.awt.Font.PLAIN, editorFontSize.coerceAtLeast(8))
+        java.awt.Font(editorFontFamily ?: monoFamily, java.awt.Font.PLAIN, editorFontSize.coerceAtLeast(8))
 
     fun resetOverrides() {
         prefs.keys().filter { it.startsWith("editor.") || it.startsWith("token.") || it.startsWith("font.") }.forEach(prefs::remove)
+    }
+
+    fun resetColorOverrides() {
+        prefs.keys().filter { it.startsWith("editor.") || it.startsWith("token.") }.forEach(prefs::remove)
     }
 
     private var cachedTheme: Theme? = null
@@ -99,6 +108,12 @@ object SyntaxThemes {
 
     private fun buildTheme(): Theme {
         val t = loadBase()
+        javax.swing.UIManager.getColor("TextArea.background")?.let { t.bgColor = it }
+        javax.swing.UIManager.getColor("TextArea.selectionBackground")?.let { t.selectionBG = it }
+        javax.swing.UIManager.getColor("TextArea.foreground")?.let { fg ->
+            t.caretColor = fg
+            t.scheme.getStyle(TokenTypes.IDENTIFIER)?.foreground = fg
+        }
         editorColor("background")?.let { t.bgColor = it }
         editorColor("selection")?.let { t.selectionBG = it }
         editorColor("caret")?.let { t.caretColor = it }

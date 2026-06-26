@@ -132,12 +132,12 @@ class ThemeEditor private constructor(owner: Window?) : JDialog(owner, "Theme Ed
         val g = grid()
         panel.add(JLabel("Base theme:"), g.at(0, 0))
         panel.add(baseCombo(Themes.all.map { it.label }, Themes.all.indexOfFirst { it.id == Themes.currentId }) {
-            Themes.apply(Themes.all[it].id); refreshAll()
+            Themes.resetChromeColors(); SyntaxThemes.resetColorOverrides(); Themes.select(Themes.all[it].id); refreshAll()
         }, g.at(1, 0, 2))
         var row = 1
-        for ((key, label) in Themes.chromeKeys) {
-            panel.add(JLabel(label), g.at(0, row))
-            panel.add(swatch({ Themes.chromeColor(key) ?: resolveChrome(key) }) { Themes.setChromeColor(key, it); Themes.apply(); refreshAll() }, g.at(1, row))
+        for (ck in Themes.chromeKeys) {
+            panel.add(JLabel(ck.label), g.at(0, row))
+            panel.add(swatch({ Themes.chromeColor(ck.id) ?: resolveChrome(ck.id) }) { Themes.setChromeColor(ck.id, it); Themes.apply(); refreshAll() }, g.at(1, row))
             row++
         }
         return wrap(panel)
@@ -170,11 +170,11 @@ class ThemeEditor private constructor(owner: Window?) : JDialog(owner, "Theme Ed
         val panel = JPanel(GridBagLayout())
         val g = grid()
         panel.add(JLabel("UI font:"), g.at(0, 0))
-        panel.add(fontCombo(Themes.uiFontFamily) { Themes.uiFontFamily = it; Themes.apply() }, g.at(1, 0))
-        panel.add(sizeSpinner(if (Themes.uiFontSize > 0) Themes.uiFontSize else UIManager.getFont("defaultFont")?.size ?: 12) { Themes.uiFontSize = it; Themes.apply() }, g.at(2, 0))
+        panel.add(fontCombo({ Themes.uiFontFamily }) { Themes.uiFontFamily = it; Themes.apply() }, g.at(1, 0))
+        panel.add(sizeSpinner({ if (Themes.uiFontSize > 0) Themes.uiFontSize else UIManager.getFont("defaultFont")?.size ?: 12 }) { Themes.uiFontSize = it; Themes.apply() }, g.at(2, 0))
         panel.add(JLabel("Editor font:"), g.at(0, 1))
-        panel.add(fontCombo(SyntaxThemes.editorFontFamily) { SyntaxThemes.editorFontFamily = it; SyntaxThemes.applyAll() }, g.at(1, 1))
-        panel.add(sizeSpinner(SyntaxThemes.editorFontSize) { SyntaxThemes.editorFontSize = it; SyntaxThemes.applyAll() }, g.at(2, 1))
+        panel.add(fontCombo({ SyntaxThemes.editorFontFamily }) { SyntaxThemes.editorFontFamily = it; SyntaxThemes.applyAll() }, g.at(1, 1))
+        panel.add(sizeSpinner({ SyntaxThemes.editorFontSize }) { SyntaxThemes.editorFontSize = it; SyntaxThemes.applyAll() }, g.at(2, 1))
         return wrap(panel)
     }
 
@@ -184,16 +184,22 @@ class ThemeEditor private constructor(owner: Window?) : JDialog(owner, "Theme Ed
             addActionListener { onPick(selectedIndex) }
         }
 
-    private fun fontCombo(current: String?, onPick: (String?) -> Unit): JComboBox<String> =
-        JComboBox((listOf("Default") + fonts.toList()).toTypedArray()).apply {
-            selectedItem = current ?: "Default"
-            addActionListener { onPick((selectedItem as String).takeIf { it != "Default" }) }
-        }
+    private fun fontCombo(current: () -> String?, onPick: (String?) -> Unit): JComboBox<String> {
+        val combo = JComboBox((listOf("Default") + fonts.toList()).toTypedArray())
+        var sync = false
+        combo.selectedItem = current() ?: "Default"
+        combo.addActionListener { if (!sync) onPick((combo.selectedItem as String).takeIf { it != "Default" }) }
+        refreshers.add { sync = true; combo.selectedItem = current() ?: "Default"; sync = false }
+        return combo
+    }
 
-    private fun sizeSpinner(value: Int, onChange: (Int) -> Unit): JSpinner =
-        JSpinner(SpinnerNumberModel(value.coerceIn(8, 40), 8, 40, 1)).apply {
-            addChangeListener { onChange(this.value as Int) }
-        }
+    private fun sizeSpinner(value: () -> Int, onChange: (Int) -> Unit): JSpinner {
+        val spinner = JSpinner(SpinnerNumberModel(value().coerceIn(8, 40), 8, 40, 1))
+        var sync = false
+        spinner.addChangeListener { if (!sync) onChange(spinner.value as Int) }
+        refreshers.add { sync = true; spinner.value = value().coerceIn(8, 40); sync = false }
+        return spinner
+    }
 
     private fun swatch(current: () -> Color?, onPick: (Color) -> Unit): JComponent {
         val sw = object : JComponent() {
@@ -229,8 +235,14 @@ class ThemeEditor private constructor(owner: Window?) : JDialog(owner, "Theme Ed
     private fun resolveChrome(key: String): Color? = when (key) {
         "@accentColor" -> UIManager.getColor("Component.accentColor") ?: UIManager.getColor("Component.focusColor")
         "@background" -> UIManager.getColor("Panel.background")
+        "componentBackground" -> UIManager.getColor("TextField.background") ?: UIManager.getColor("List.background")
         "@foreground" -> UIManager.getColor("Label.foreground")
         "@selectionBackground" -> UIManager.getColor("List.selectionBackground")
+        "Actions.Red" -> UiColors.error()
+        "Actions.Yellow" -> UiColors.warning()
+        "Actions.Green" -> UiColors.success()
+        "Actions.Blue" -> UiColors.info()
+        "Label.disabledForeground" -> UiColors.disabled()
         else -> UIManager.getColor(key)
     }
 

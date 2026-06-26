@@ -6,10 +6,11 @@ binarydata = "0.2.2"
 bined = "0.2.2"
 coroutines = "1.11.0"
 flatlaf = "3.7.1"
+flatlaf-fonts-inter = "4.1"
+flatlaf-fonts-jetbrains-mono = "2.304"
 graalpy = "25.0.2"
 jadx = "1.5.5"
 jdwp = "2.0.0"
-jungrapht = "1.4"
 junit-jupiter = "6.0.1"
 kotlin = "2.3.20"
 miglayout = "11.4.2"
@@ -28,6 +29,8 @@ binary-data-array = { module = "org.exbin.auxiliary:binary_data-array", version.
 flatlaf = { module = "com.formdev:flatlaf", version.ref = "flatlaf" }
 flatlaf-extras = { module = "com.formdev:flatlaf-extras", version.ref = "flatlaf" }
 flatlaf-intellij-themes = { module = "com.formdev:flatlaf-intellij-themes", version.ref = "flatlaf" }
+flatlaf-fonts-inter = { module = "com.formdev:flatlaf-fonts-inter", version.ref = "flatlaf-fonts-inter" }
+flatlaf-fonts-jetbrains-mono = { module = "com.formdev:flatlaf-fonts-jetbrains-mono", version.ref = "flatlaf-fonts-jetbrains-mono" }
 graalpy-polyglot = { module = "org.graalvm.polyglot:polyglot", version.ref = "graalpy" }
 graalpy-language = { module = "org.graalvm.python:python-language", version.ref = "graalpy" }
 graalpy-resources = { module = "org.graalvm.python:python-resources", version.ref = "graalpy" }
@@ -36,7 +39,6 @@ graalpy-regex = { module = "org.graalvm.regex:regex", version.ref = "graalpy" }
 jadx-core = { module = "io.github.skylot:jadx-core", version.ref = "jadx" }
 jadx-dex-input = { module = "io.github.skylot:jadx-dex-input", version.ref = "jadx" }
 jdwp = { module = "io.github.skylot:jdwp", version.ref = "jdwp" }
-jungrapht-layout = { module = "com.github.tomnelson:jungrapht-layout", version.ref = "jungrapht" }
 junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit-jupiter" }
 kotlinx-coroutines-swing = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-swing", version.ref = "coroutines" }
 miglayout-swing = { module = "com.miglayout:miglayout-swing", version.ref = "miglayout" }

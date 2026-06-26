@@ -4,7 +4,6 @@ import io.github.nitanmarcel.jdex.project.Syntax
 import org.fife.ui.rsyntaxtextarea.AbstractTokenMakerFactory
 import org.fife.ui.rsyntaxtextarea.RSyntaxTextArea
 import org.fife.ui.rsyntaxtextarea.TokenMakerFactory
-import java.awt.Font
 
 class CodeTextArea(text: String, syntax: Syntax) : RSyntaxTextArea() {
 
@@ -12,7 +11,7 @@ class CodeTextArea(text: String, syntax: Syntax) : RSyntaxTextArea() {
         isEditable = false
         antiAliasingEnabled = true
         highlightCurrentLine = false
-        font = Font(Font.MONOSPACED, Font.PLAIN, 12)
+        font = SyntaxThemes.editorFont()
         syntaxEditingStyle = SyntaxStyles.mime(syntax)
         setText(text)
         caretPosition = 0

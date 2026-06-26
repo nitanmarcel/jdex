@@ -14,11 +14,6 @@ import io.github.nitanmarcel.jdex.project.Syntax
 import org.fife.ui.rsyntaxtextarea.SyntaxScheme
 import org.fife.ui.rsyntaxtextarea.TokenMakerFactory
 import org.fife.ui.rsyntaxtextarea.TokenTypes
-import org.jgrapht.graph.DefaultEdge
-import org.jgrapht.graph.DirectedPseudograph
-import org.jungrapht.visualization.layout.algorithms.SugiyamaLayoutAlgorithm
-import org.jungrapht.visualization.layout.model.LayoutModel
-import org.jungrapht.visualization.layout.model.Rectangle
 import java.awt.BasicStroke
 import java.awt.Color
 import java.awt.Graphics
@@ -34,6 +29,7 @@ import java.awt.geom.AffineTransform
 import java.awt.geom.Path2D
 import java.awt.geom.Point2D
 import java.awt.geom.Rectangle2D
+import java.awt.geom.RoundRectangle2D
 import javax.swing.text.Segment
 import javax.swing.AbstractAction
 import javax.swing.JComponent
@@ -67,8 +63,6 @@ class GraphView(
     private val cw = fm.charWidth('0')
     private val padX = 10
     private val padY = 6
-    private val hGap = 36.0
-    private val vGap = 44.0
     private val margin = 24.0
 
     private val renames get() = host.renames
@@ -87,7 +81,6 @@ class GraphView(
 
     private val nodes = ArrayList<Node>()
     private val nodeByBlock = HashMap<Int, Node>()
-    private val layerOf = HashMap<Int, Int>()
     private val flat = ArrayList<Pair<Int, Int>>()
     private val effLine = HashMap<Int, Int>()
     private val edgePaths = ArrayList<EdgePath>()
@@ -134,7 +127,7 @@ class GraphView(
     private fun lineCols(l: GLine): Int = l.text.length + (l.comment?.let { ("    ; $it").length } ?: 0)
 
     private fun buildLayout() {
-        nodes.clear(); nodeByBlock.clear(); layerOf.clear(); flat.clear(); edgePaths.clear(); effLine.clear()
+        nodes.clear(); nodeByBlock.clear(); flat.clear(); edgePaths.clear(); effLine.clear()
         var cur: Int? = null
         for (b in cfg.blocks) {
             val lines = buildLines(b)
@@ -150,110 +143,21 @@ class GraphView(
         }
         if (nodes.isEmpty()) return
 
-        val g = DirectedPseudograph<Int, DefaultEdge>(DefaultEdge::class.java)
-        cfg.blocks.forEach { g.addVertex(it.id) }
-        cfg.edges.asSequence().filter { it.from != it.to }.map { it.from to it.to }.distinct()
-            .forEach { (f, t) -> runCatching { g.addEdge(f, t) } }
+        val sizes = nodes.associate { it.block to doubleArrayOf(it.rect.width, it.rect.height) }
+        val present = cfg.edges.filter { nodeByBlock[it.from] != null && nodeByBlock[it.to] != null }
+        val entry = cfg.blocks.firstOrNull { it.insns.isNotEmpty() }?.id ?: cfg.blocks.first().id
+        val res = CfgLayout(margin = margin).layout(sizes, present.map { intArrayOf(it.from, it.to) }, entry)
 
-        val lm = LayoutModel.builder<Int>().graph(g).size(4000, 4000).build()
-        val alg = SugiyamaLayoutAlgorithm.edgeAwareBuilder<Int, DefaultEdge>().threaded(false).build()
-        alg.setVertexBoundsFunction { id -> nodeByBlock[id]!!.let { Rectangle.of(0.0, 0.0, it.rect.width, it.rect.height) } }
-        runCatching { lm.accept(alg) }
-
-        val minNodeH = nodes.minOf { it.rect.height }
-        val layers = ArrayList<MutableList<Node>>()
-        var lastY = Double.NEGATIVE_INFINITY
-        nodes.sortedBy { lm.get(it.block).y }.forEach { n ->
-            val y = lm.get(n.block).y
-            if (layers.isEmpty() || y - lastY > minNodeH * 0.5) layers.add(mutableListOf(n)) else layers.last().add(n)
-            lastY = y
+        for (n in nodes) res.rects[n.block]?.let { n.rect = it }
+        present.forEachIndexed { i, edge ->
+            val r = res.routes[i]
+            if (r.xs.size < 2) return@forEachIndexed
+            val last = r.xs.size - 1
+            edgePaths.add(EdgePath(edge, r.xs, r.ys, r.xs[last] - r.xs[last - 1], r.ys[last] - r.ys[last - 1]))
         }
 
-        var y = margin
-        layers.forEachIndexed { li, layer ->
-            layer.sortBy { lm.get(it.block).x }
-            val layerH = layer.maxOf { it.rect.height }
-            val totalW = layer.sumOf { it.rect.width } + hGap * (layer.size - 1)
-            var x = -totalW / 2
-            for (n in layer) {
-                n.rect = Rectangle2D.Double(x, y + (layerH - n.rect.height) / 2, n.rect.width, n.rect.height)
-                layerOf[n.block] = li
-                x += n.rect.width + hGap
-            }
-            y += layerH + vGap
-        }
-
-        val minX = nodes.minOf { it.rect.x }
-        nodes.forEach { it.rect.x += margin - minX }
-        computeEdgePaths()
-        val maxEdgeX = edgePaths.maxOfOrNull { p -> p.xs.maxOrNull() ?: 0.0 } ?: 0.0
-        contentW = maxOf(nodes.maxOf { it.rect.maxX }, maxEdgeX) + margin
-        contentH = maxOf(nodes.maxOf { it.rect.maxY }, edgePaths.maxOfOrNull { p -> p.ys.maxOrNull() ?: 0.0 } ?: 0.0) + margin
-    }
-
-    private fun adjacent(e: CfgEdge): Boolean {
-        val la = layerOf[e.from] ?: return false
-        val lb = layerOf[e.to] ?: return false
-        return e.from != e.to && lb - la == 1
-    }
-
-    private fun computeEdgePaths() {
-        edgePaths.clear()
-        val direct = cfg.edges.filter { adjacent(it) }
-        val outOf = direct.groupBy { it.from }.mapValues { (_, es) -> es.sortedBy { nodeByBlock[it.to]?.rect?.centerX ?: 0.0 } }
-        val intoOf = direct.groupBy { it.to }.mapValues { (_, es) -> es.sortedBy { nodeByBlock[it.from]?.rect?.centerX ?: 0.0 } }
-        fun spread(node: Node, list: List<CfgEdge>?, edge: CfgEdge): Double {
-            val n = list?.size ?: 1
-            if (n <= 1) return node.rect.centerX
-            val i = list!!.indexOf(edge)
-            val gap = minOf(24.0, (node.rect.width - 16) / n)
-            return node.rect.centerX + (i - (n - 1) / 2.0) * gap
-        }
-        for (edge in cfg.edges) {
-            val a = nodeByBlock[edge.from] ?: continue
-            val b = nodeByBlock[edge.to] ?: continue
-            if (adjacent(edge)) {
-                val outs = outOf[edge.from]
-                val x1 = spread(a, outs, edge); val y1 = a.rect.maxY
-                val x2 = spread(b, intoOf[edge.to], edge); val y2 = b.rect.y
-                val n = outs?.size ?: 1
-                val i = outs?.indexOf(edge) ?: 0
-                val midY = (y1 + y2) / 2 + (i - (n - 1) / 2.0) * 5
-                edgePaths.add(EdgePath(edge, doubleArrayOf(x1, x1, x2, x2), doubleArrayOf(y1, midY, midY, y2), 0.0, 1.0))
-            } else {
-                edgePaths.add(routeOrthogonal(edge, a, b))
-            }
-        }
-    }
-
-    private fun routeOrthogonal(edge: CfgEdge, a: Node, b: Node): EdgePath {
-        val x1 = a.rect.centerX; val y1 = a.rect.maxY
-        val x2 = b.rect.centerX; val y2 = b.rect.y
-        val bandTop = minOf(a.rect.maxY, b.rect.y) - 4
-        val bandBot = maxOf(a.rect.maxY, b.rect.y) + 4
-        val occ = nodes.filter { it !== a && it !== b && it.rect.maxY > bandTop && it.rect.y < bandBot }
-            .map { (it.rect.x - 10) to (it.rect.maxX + 10) }
-        fun free(x: Double) = occ.none { x in it.first..it.second }
-        val colX = when {
-            free(x1) -> x1
-            free(x2) -> x2
-            else -> {
-                val candidates = occ.flatMap { listOf(it.first - 4, it.second + 4) } + listOf(x1, x2)
-                candidates.filter { free(it) }.minByOrNull { minOf(Math.abs(it - x1), Math.abs(it - x2)) }
-                    ?.coerceAtLeast(4.0) ?: x1
-            }
-        }
-        if (colX == x1 && colX == x2) {
-            return EdgePath(edge, doubleArrayOf(x1, x2), doubleArrayOf(y1, y2), 0.0, 1.0)
-        }
-        val yA = y1 + 10
-        val yB = y2 - 10
-        return EdgePath(
-            edge,
-            doubleArrayOf(x1, x1, colX, colX, x2, x2),
-            doubleArrayOf(y1, yA, yA, yB, yB, y2),
-            0.0, 1.0,
-        )
+        contentW = res.width
+        contentH = res.height
     }
 
     fun refresh() {
@@ -534,7 +438,7 @@ class GraphView(
         CfgEdgeKind.COND_FALSE -> UiColors.error()
         CfgEdgeKind.GOTO, CfgEdgeKind.FALLTHROUGH -> UiColors.info()
         CfgEdgeKind.SWITCH_CASE -> UiColors.accent()
-        CfgEdgeKind.EXCEPTION -> Color(0xC0, 0x80, 0x30)
+        CfgEdgeKind.EXCEPTION -> UiColors.warning()
     }
 
     private fun paintEdges(g2: Graphics2D) {
@@ -598,27 +502,36 @@ class GraphView(
     }
 
     private fun paintNodes(g2: Graphics2D, bg: Color, fg: Color, scheme: SyntaxScheme) {
-        val blockBg = blend(bg, fg, 0.07)
+        val blockBg = blend(bg, fg, 0.06)
+        val headerBg = blend(bg, fg, 0.13)
         val border = UiColors.border()
+        val accent = UiColors.accent()
         val headerFg = blend(bg, fg, 0.6)
         val commentFg = blend(bg, UiColors.success(), 0.85)
-        val selBg = UiColors.alpha(UiColors.accent(), 64)
-        val syncBg = UiColors.alpha(UiColors.accent(), 40)
+        val selBg = UiColors.alpha(accent, 64)
+        val syncBg = UiColors.alpha(accent, 40)
         val hoverBg = blend(bg, fg, 0.16)
+        val arc = 12.0
+        val headerH = padY + lineH
         g2.font = font
         for (n in nodes) {
             val r = n.rect
-            g2.color = blockBg; g2.fillRoundRect(r.x.toInt(), r.y.toInt(), r.width.toInt(), r.height.toInt(), 8, 8)
-            g2.color = border; g2.drawRoundRect(r.x.toInt(), r.y.toInt(), r.width.toInt(), r.height.toInt(), 8, 8)
+            val active = n.block == selBlock
+            val shape = RoundRectangle2D.Double(r.x, r.y, r.width, r.height, arc, arc)
+            g2.color = blockBg; g2.fill(shape)
+            val oldClip = g2.clip
+            g2.clip(shape)
+            g2.color = headerBg; g2.fillRect(r.x.toInt(), r.y.toInt(), r.width.toInt(), headerH)
+            g2.color = border; g2.drawLine(r.x.toInt(), (r.y + headerH).toInt(), (r.x + r.width).toInt(), (r.y + headerH).toInt())
             val x = (r.x + padX)
             n.lines.forEachIndexed { i, line ->
                 val top = (r.y + padY + i * lineH)
-                if (n.block == hoverBlock && i == hoverInsn + 1) { g2.color = hoverBg; g2.fillRect((r.x + 1).toInt(), top.toInt(), (r.width - 2).toInt(), lineH) }
-                if (n.block == syncBlock && i == syncInsn + 1) { g2.color = syncBg; g2.fillRect((r.x + 1).toInt(), top.toInt(), (r.width - 2).toInt(), lineH) }
-                if (n.block == selBlock && i == selInsn + 1) { g2.color = selBg; g2.fillRect((r.x + 1).toInt(), top.toInt(), (r.width - 2).toInt(), lineH) }
+                if (n.block == hoverBlock && i == hoverInsn + 1) { g2.color = hoverBg; g2.fillRect(r.x.toInt(), top.toInt(), r.width.toInt(), lineH) }
+                if (n.block == syncBlock && i == syncInsn + 1) { g2.color = syncBg; g2.fillRect(r.x.toInt(), top.toInt(), r.width.toInt(), lineH) }
+                if (active && i == selInsn + 1) { g2.color = selBg; g2.fillRect(r.x.toInt(), top.toInt(), r.width.toInt(), lineH) }
                 val baseline = (top + fm.ascent).toFloat()
                 if (i == 0) {
-                    g2.color = headerFg
+                    g2.color = if (active) accent else headerFg
                     g2.drawString(line.text, x.toFloat(), baseline)
                 } else {
                     paintTokens(g2, line.text, x.toFloat(), baseline, scheme, fg, bg)
@@ -628,6 +541,11 @@ class GraphView(
                     }
                 }
             }
+            g2.clip = oldClip
+            g2.color = if (active) accent else border
+            g2.stroke = if (active) BasicStroke(1.8f) else BasicStroke(1f)
+            g2.draw(shape)
+            g2.stroke = BasicStroke(1f)
         }
     }
 

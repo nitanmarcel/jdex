@@ -36,10 +36,12 @@ class DebugToolBar(
     private val deviceCombo = JComboBox<DebugDevice>().apply {
         maximumSize = Dimension(240, 26)
         prototypeDisplayValue = DebugDevice("emulator-5554", "Pixel 7", true)
+        putClientProperty("JTextField.placeholderText", "Select device")
     }
     private val processCombo = JComboBox<DebugProcess>().apply {
         maximumSize = Dimension(280, 26)
         prototypeDisplayValue = DebugProcess(0, "io.github.nitanmarcel.jdexdbg")
+        putClientProperty("JTextField.placeholderText", "Select process")
     }
     private val refreshBtn = JButton(Icons.REFRESH).apply { toolTipText = "Refresh devices" }
     private val attachBtn = JButton("Attach", Icons.DEBUG_CONTINUE).apply { toolTipText = "Attach debugger to the selected process"; isEnabled = false }
@@ -58,6 +60,8 @@ class DebugToolBar(
 
     init {
         isFloatable = false
+        isOpaque = false
+        border = javax.swing.BorderFactory.createEmptyBorder()
         deviceCombo.renderer = renderer<DebugDevice> { d -> if (d.online) "${d.label} (${d.serial})" else "${d.label} (${d.serial}) — offline" }
         processCombo.renderer = object : DefaultListCellRenderer() {
             override fun getListCellRendererComponent(list: JList<*>?, value: Any?, index: Int, selected: Boolean, focus: Boolean): Component {

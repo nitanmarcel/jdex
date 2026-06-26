@@ -11,6 +11,7 @@ class EditorTab(
     private val title: String,
     content: JComponent,
     private val closeable: AutoCloseable? = null,
+    private val icon: javax.swing.Icon? = null,
 ) : JPanel(BorderLayout()), Dockable {
 
     init {
@@ -23,6 +24,8 @@ class EditorTab(
     }
 
     override fun isWrappableInScrollpane() = false
+
+    override fun getIcon(): javax.swing.Icon? = icon
 
     override fun getPersistentID() = id
 
